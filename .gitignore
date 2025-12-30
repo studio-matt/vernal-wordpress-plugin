@@ -1,0 +1,35 @@
+# WordPress
+.DS_Store
+Thumbs.db
+
+# Plugin update checker (keep the library, ignore its .git)
+lib/plugin-update-checker/.git
+lib/plugin-update-checker/.github
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+

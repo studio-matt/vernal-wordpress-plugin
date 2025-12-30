@@ -1,0 +1,42 @@
+name: Deploy to Server
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+      
+      - name: Deploy files via rsync
+        run: |
+          rsync -avz --delete \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='.gitignore' \
+            --exclude='README.md' \
+            --exclude='.DS_Store' \
+            ./ ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:${{ secrets.SERVER_PATH }}
+      
+      - name: Verify deployment
+        run: |
+          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
+            "ls -la ${{ secrets.SERVER_PATH }}"
+

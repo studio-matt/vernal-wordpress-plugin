@@ -1,0 +1,68 @@
+name: Build & Release Plugin
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: get_version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+
+      - name: Build ZIP
+        run: |
+          PLUGIN_SLUG="vernal-contentum"
+          mkdir -p dist/$PLUGIN_SLUG
+          
+          # Copy all files except excluded ones
+          rsync -av \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='dist' \
+            --exclude='.gitignore' \
+            --exclude='DEPLOYMENT.md' \
+            --exclude='README.md' \
+            --exclude='.DS_Store' \
+            --exclude='node_modules' \
+            ./ dist/$PLUGIN_SLUG/
+          
+          cd dist
+          zip -r ${PLUGIN_SLUG}.zip $PLUGIN_SLUG
+          
+          echo "ZIP created: ${PLUGIN_SLUG}.zip"
+          ls -lh ${PLUGIN_SLUG}.zip
+
+      - name: Create GitHub Release + upload asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/vernal-contentum.zip
+          tag_name: ${{ github.ref }}
+          name: Release ${{ steps.get_version.outputs.version }}
+          body: |
+            ## Version ${{ steps.get_version.outputs.version }}
+            
+            Automated release from tag ${{ github.ref }}.
+            
+            ### Installation
+            1. Download the ZIP file below
+            2. Upload via WordPress Admin → Plugins → Add New → Upload Plugin
+            3. Or extract to `/wp-content/plugins/vernal-contentum/`
+            
+            ### Update
+            If you have the plugin installed, WordPress will automatically detect this update.
+          draft: false
+          prerelease: false
+
