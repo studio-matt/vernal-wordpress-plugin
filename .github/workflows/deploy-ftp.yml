@@ -18,18 +18,20 @@ jobs:
       - name: Verify secrets are set
         run: |
           if [ -z "${{ secrets.SERVER }}" ]; then
-            echo "ERROR: SERVER secret is not set"
+            echo "::error::SERVER secret is not set. Please add it in Settings > Secrets and variables > Actions"
             exit 1
           fi
           if [ -z "${{ secrets.USERNAME }}" ]; then
-            echo "ERROR: USERNAME secret is not set"
+            echo "::error::USERNAME secret is not set. Please add it in Settings > Secrets and variables > Actions"
             exit 1
           fi
           if [ -z "${{ secrets.PASSWORD }}" ]; then
-            echo "ERROR: PASSWORD secret is not set"
+            echo "::error::PASSWORD secret is not set. Please add it in Settings > Secrets and variables > Actions"
             exit 1
           fi
           echo "✓ All secrets are configured"
+          echo "Server: ${{ secrets.SERVER }}"
+          echo "Username: ${{ secrets.USERNAME }}"
       
       - name: Deploy via FTP
         uses: SamKirkland/FTP-Deploy-Action@4.3.0
