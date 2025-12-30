@@ -1,9 +1,16 @@
-name: Build & Release Plugin
+name: Build & Release Plugin (Manual)
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g., 1.0.1)'
+        required: true
+        type: string
+      release_notes:
+        description: 'Release notes (optional)'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -12,10 +19,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Extract version from tag
-        id: get_version
+      - name: Set version
+        id: set_version
         run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
+          VERSION="${{ github.event.inputs.version }}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Building version: $VERSION from production folder"
 
@@ -28,6 +35,16 @@ jobs:
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Update version in production files
+        run: |
+          VERSION="${{ steps.set_version.outputs.version }}"
+          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << EOF
+            cd ${{ secrets.SERVER_PATH }}
+            sed -i "s/Version: [0-9.]*/Version: \$VERSION/" vernal-contentum.php
+            sed -i "s/define('VERNAL_CONTENTUM_VERSION', '[^']*');/define('VERNAL_CONTENTUM_VERSION', '\$VERSION');/" vernal-contentum.php
+          EOF
+          echo "Version updated to $VERSION in production"
 
       - name: Download files from production server
         run: |
@@ -45,16 +62,28 @@ jobs:
           echo "ZIP created from production folder: ${PLUGIN_SLUG}.zip"
           ls -lh ${PLUGIN_SLUG}.zip
 
+      - name: Checkout repo for tagging
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create Git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ steps.set_version.outputs.version }}" -m "Release version ${{ steps.set_version.outputs.version }}"
+          git push origin "v${{ steps.set_version.outputs.version }}"
+
       - name: Create GitHub Release + upload asset
         uses: softprops/action-gh-release@v2
         with:
           files: dist/vernal-contentum.zip
-          tag_name: ${{ github.ref }}
-          name: Release ${{ steps.get_version.outputs.version }}
+          tag_name: v${{ steps.set_version.outputs.version }}
+          name: Release v${{ steps.set_version.outputs.version }}
           body: |
-            ## Version ${{ steps.get_version.outputs.version }}
+            ## Version ${{ steps.set_version.outputs.version }}
             
-            Automated release from tag ${{ github.ref }}.
+            ${{ github.event.inputs.release_notes || 'Official release built from production.' }}
             
             ### Installation
             1. Download the ZIP file below
