@@ -15,6 +15,29 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       
+      - name: Verify secrets are set
+        run: |
+          if [ -z "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
+            echo "::error::SSH_PRIVATE_KEY secret is not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.SERVER_HOST }}" ]; then
+            echo "::error::SERVER_HOST secret is not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.SERVER_USER }}" ]; then
+            echo "::error::SERVER_USER secret is not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.SERVER_PATH }}" ]; then
+            echo "::error::SERVER_PATH secret is not set"
+            exit 1
+          fi
+          echo "✓ All secrets are configured"
+          echo "Server: ${{ secrets.SERVER_HOST }}"
+          echo "User: ${{ secrets.SERVER_USER }}"
+          echo "Path: ${{ secrets.SERVER_PATH }}"
+
       - name: Setup SSH
         uses: webfactory/ssh-agent@v0.9.0
         with:
@@ -23,7 +46,14 @@ jobs:
       - name: Add server to known hosts
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+          SERVER="${{ secrets.SERVER_HOST }}"
+          echo "Attempting to connect to: $SERVER"
+          ssh-keyscan -H "$SERVER" >> ~/.ssh/known_hosts 2>&1 || {
+            echo "::error::Failed to resolve or connect to $SERVER"
+            echo "Please verify SERVER_HOST secret is correct: $SERVER"
+            exit 1
+          }
+          echo "✓ Server added to known hosts"
       
       - name: Deploy files via rsync
         run: |
