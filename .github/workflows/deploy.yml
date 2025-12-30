@@ -48,9 +48,27 @@ jobs:
           mkdir -p ~/.ssh
           SERVER="${{ secrets.SERVER_HOST }}"
           echo "Attempting to connect to: $SERVER"
+          echo "Testing DNS resolution..."
+          if ! host "$SERVER" > /dev/null 2>&1 && ! nslookup "$SERVER" > /dev/null 2>&1; then
+            echo "::warning::Hostname may not be publicly resolvable. Trying ssh-keyscan anyway..."
+          fi
+          # Try to resolve hostname first
+          if ! host "$SERVER" > /dev/null 2>&1 && ! nslookup "$SERVER" > /dev/null 2>&1; then
+            echo "::warning::Hostname '$SERVER' is not publicly resolvable"
+            echo "This is OK if you're using an IP address, but if using hostname, GitHub Actions cannot reach it"
+          fi
+          
           ssh-keyscan -H "$SERVER" >> ~/.ssh/known_hosts 2>&1 || {
             echo "::error::Failed to resolve or connect to $SERVER"
-            echo "Please verify SERVER_HOST secret is correct: $SERVER"
+            echo ""
+            echo "SOLUTION: Use your server's PUBLIC IP ADDRESS instead of hostname"
+            echo ""
+            echo "To find your server's IP:"
+            echo "1. SSH into your server"
+            echo "2. Run: curl -s ifconfig.me"
+            echo "3. Update SERVER_HOST secret with the IP address (e.g., 123.45.67.89)"
+            echo ""
+            echo "Current SERVER_HOST value: $SERVER"
             exit 1
           }
           echo "✓ Server added to known hosts"
