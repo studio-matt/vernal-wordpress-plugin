@@ -1,10 +1,12 @@
-name: Deploy to Server (FTP)
+name: Deploy to Server (FTP - Disabled)
 
 on:
-  push:
-    branches:
-      - main
-      - master
+  # Disabled - using SSH deployment instead (FTP passive mode issues)
+  # Uncomment below to re-enable FTP deployment
+  # push:
+  #   branches:
+  #     - main
+  #     - master
   workflow_dispatch: # Allows manual triggering
 
 jobs:

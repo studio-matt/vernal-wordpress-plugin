@@ -1,12 +1,10 @@
-name: Deploy to Server (SSH - Disabled)
+name: Deploy to Server (SSH)
 
 on:
-  # Disabled - using FTP deployment instead
-  # Uncomment below and add SSH secrets to enable
-  # push:
-  #   branches:
-  #     - main
-  #     - master
+  push:
+    branches:
+      - main
+      - master
   workflow_dispatch: # Allows manual triggering
 
 jobs:
@@ -31,9 +29,13 @@ jobs:
         run: |
           rsync -avz --delete \
             --exclude='.git' \
+            --exclude='.git/**' \
             --exclude='.github' \
             --exclude='.gitignore' \
             --exclude='README.md' \
+            --exclude='DEPLOYMENT.md' \
+            --exclude='VERSIONING.md' \
+            --exclude='TROUBLESHOOTING.md' \
             --exclude='.DS_Store' \
             ./ ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:${{ secrets.SERVER_PATH }}
       
