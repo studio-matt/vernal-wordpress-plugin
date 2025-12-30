@@ -1,10 +1,12 @@
-name: Deploy to Server
+name: Deploy to Server (SSH - Disabled)
 
 on:
-  push:
-    branches:
-      - main
-      - master
+  # Disabled - using FTP deployment instead
+  # Uncomment below and add SSH secrets to enable
+  # push:
+  #   branches:
+  #     - main
+  #     - master
   workflow_dispatch: # Allows manual triggering
 
 jobs:
