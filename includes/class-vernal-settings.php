@@ -130,7 +130,9 @@ class Vernal_Settings {
                     ><?php 
                         echo esc_textarea(json_encode(array(
                             'site_url' => $site_url,
+                            'username' => $wp_username,
                             'api_key' => $api_key,
+                            'app_password' => $api_key, // Alias for compatibility
                             'api_endpoint' => rest_url('vernal-contentum/v1/')
                         ), JSON_PRETTY_PRINT));
                     ?></textarea>
