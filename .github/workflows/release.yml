@@ -12,37 +12,37 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Extract version from tag
         id: get_version
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Building version: $VERSION"
+          echo "Building version: $VERSION from production folder"
 
-      - name: Build ZIP
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Download files from production server
+        run: |
+          mkdir -p dist/vernal-contentum
+          rsync -avz \
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:${{ secrets.SERVER_PATH }} \
+            dist/vernal-contentum/
+
+      - name: Build ZIP from production files
         run: |
           PLUGIN_SLUG="vernal-contentum"
-          mkdir -p dist/$PLUGIN_SLUG
-          
-          # Copy all files except excluded ones
-          rsync -av \
-            --exclude='.git' \
-            --exclude='.github' \
-            --exclude='dist' \
-            --exclude='.gitignore' \
-            --exclude='DEPLOYMENT.md' \
-            --exclude='README.md' \
-            --exclude='.DS_Store' \
-            --exclude='node_modules' \
-            ./ dist/$PLUGIN_SLUG/
-          
           cd dist
           zip -r ${PLUGIN_SLUG}.zip $PLUGIN_SLUG
           
-          echo "ZIP created: ${PLUGIN_SLUG}.zip"
+          echo "ZIP created from production folder: ${PLUGIN_SLUG}.zip"
           ls -lh ${PLUGIN_SLUG}.zip
 
       - name: Create GitHub Release + upload asset
