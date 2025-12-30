@@ -41,12 +41,14 @@ jobs:
           password: ${{ secrets.PASSWORD }}
           server-dir: /
           exclude: |
+            **/.git/**
             **/.git*
             **/.github/**
             **/.gitignore
             **/README.md
             **/DEPLOYMENT.md
             **/VERSIONING.md
+            **/TROUBLESHOOTING.md
             **/.DS_Store
           dangerous-clean-slate: false
           dry-run: false

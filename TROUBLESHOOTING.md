@@ -109,7 +109,30 @@ You can manually trigger the workflow:
 
 This helps test without making a new commit.
 
-### 7. Still Having Issues?
+### 7. Passive Mode FTP Connection Failure
+
+**Error**: `Can't open data connection in passive mode: connect ECONNREFUSED`
+
+**Cause**: Your FTP server's firewall is blocking the passive mode data connection ports that GitHub Actions tries to connect to.
+
+**Solutions**:
+1. **Configure FTP Server Firewall** (Recommended):
+   - Open passive mode port range on your server firewall
+   - Configure your FTP server (Pure-FTPd, vsftpd, etc.) to use a specific passive port range
+   - Add firewall rules to allow those ports from GitHub Actions IP ranges
+   - Common passive port ranges: 49152-65534 or 50000-51000
+
+2. **Use SFTP/SSH Instead** (Easier):
+   - SFTP works better with firewalls (uses single port 22)
+   - Enable the SSH deployment workflow (`.github/workflows/deploy.yml`)
+   - Add SSH secrets: `SSH_PRIVATE_KEY`, `SERVER_HOST`, `SERVER_USER`, `SERVER_PATH`
+   - Disable the FTP workflow
+
+3. **Contact Your Hosting Provider**:
+   - Ask them to configure passive mode ports for FTP
+   - Or request SFTP/SSH access instead
+
+### 8. Still Having Issues?
 
 If you're still experiencing problems:
 1. Check the GitHub Actions logs for the specific error message
