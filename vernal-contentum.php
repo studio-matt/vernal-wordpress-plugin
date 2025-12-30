@@ -39,6 +39,7 @@ $updateChecker->getVcsApi()->enableReleaseAssets();
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-settings.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-api.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-sitemap.php';
+require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-schema.php';
 
 /**
  * Main plugin class
@@ -67,6 +68,9 @@ class Vernal_Contentum {
         
         // Initialize sitemap handler
         Vernal_Sitemap::get_instance();
+        
+        // Initialize schema/TOC handler
+        Vernal_Schema::get_instance();
         
         // Activation/Deactivation hooks
         register_activation_hook(__FILE__, array($this, 'activate'));

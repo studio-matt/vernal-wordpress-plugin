@@ -78,6 +78,62 @@ class Vernal_Settings {
             'vernal-contentum',
             'vernal_connection_section'
         );
+        
+        // Sitemap/Schema Settings Section
+        add_settings_section(
+            'vernal_sitemap_section',
+            __('Sitemap & Schema Settings', 'vernal-contentum'),
+            array($this, 'render_sitemap_section'),
+            'vernal-contentum'
+        );
+        
+        add_settings_field(
+            'vernal_show_toc',
+            __('Show Table of Contents', 'vernal-contentum'),
+            array($this, 'render_show_toc_field'),
+            'vernal-contentum',
+            'vernal_sitemap_section'
+        );
+        
+        add_settings_field(
+            'vernal_toc_label',
+            __('TOC Label', 'vernal-contentum'),
+            array($this, 'render_toc_label_field'),
+            'vernal-contentum',
+            'vernal_sitemap_section'
+        );
+        
+        add_settings_field(
+            'vernal_toc_style',
+            __('TOC Style', 'vernal-contentum'),
+            array($this, 'render_toc_style_field'),
+            'vernal-contentum',
+            'vernal_sitemap_section'
+        );
+        
+        add_settings_field(
+            'vernal_show_schema',
+            __('Show Schema JSON-LD', 'vernal-contentum'),
+            array($this, 'render_show_schema_field'),
+            'vernal-contentum',
+            'vernal_sitemap_section'
+        );
+        
+        add_settings_field(
+            'vernal_use_site_logo',
+            __('Use Site Logo', 'vernal-contentum'),
+            array($this, 'render_use_site_logo_field'),
+            'vernal-contentum',
+            'vernal_sitemap_section'
+        );
+        
+        add_settings_field(
+            'vernal_logo_url',
+            __('Custom Logo URL', 'vernal-contentum'),
+            array($this, 'render_logo_url_field'),
+            'vernal-contentum',
+            'vernal_sitemap_section'
+        );
     }
     
     public function sanitize_settings($input) {
@@ -96,6 +152,31 @@ class Vernal_Settings {
             if (!empty($input['password'])) {
                 $sanitized['password'] = base64_encode($input['password']); // Basic encoding, consider encryption
             }
+        }
+        
+        // Sitemap/Schema settings
+        if (isset($input['show_toc'])) {
+            $sanitized['show_toc'] = !empty($input['show_toc']) ? 1 : 0;
+        }
+        
+        if (isset($input['toc_label'])) {
+            $sanitized['toc_label'] = sanitize_text_field($input['toc_label']);
+        }
+        
+        if (isset($input['toc_style'])) {
+            $sanitized['toc_style'] = in_array($input['toc_style'], array('bullets', 'numbers')) ? $input['toc_style'] : 'bullets';
+        }
+        
+        if (isset($input['show_schema'])) {
+            $sanitized['show_schema'] = !empty($input['show_schema']) ? 1 : 0;
+        }
+        
+        if (isset($input['use_site_logo'])) {
+            $sanitized['use_site_logo'] = !empty($input['use_site_logo']) ? 1 : 0;
+        }
+        
+        if (isset($input['logo_url'])) {
+            $sanitized['logo_url'] = esc_url_raw($input['logo_url']);
         }
         
         return $sanitized;
@@ -237,6 +318,102 @@ class Vernal_Settings {
             <?php _e('Copy', 'vernal-contentum'); ?>
         </button>
         <p class="description"><?php _e('This API key is used to authenticate requests from your Vernal Contentum web app.', 'vernal-contentum'); ?></p>
+        <?php
+    }
+    
+    public function render_sitemap_section() {
+        echo '<p>' . __('Configure sitemap and schema JSON-LD output settings.', 'vernal-contentum') . '</p>';
+    }
+    
+    public function render_show_toc_field() {
+        $settings = get_option('vernal_contentum_settings', array());
+        $value = isset($settings['show_toc']) ? $settings['show_toc'] : 0;
+        ?>
+        <label>
+            <input 
+                type="checkbox" 
+                name="vernal_contentum_settings[show_toc]" 
+                value="1" 
+                <?php checked($value, 1); ?>
+            />
+            <?php _e('Enable Table of Contents on posts and pages', 'vernal-contentum'); ?>
+        </label>
+        <p class="description"><?php _e('Automatically generates a table of contents from H2/H3 headings.', 'vernal-contentum'); ?></p>
+        <?php
+    }
+    
+    public function render_toc_label_field() {
+        $settings = get_option('vernal_contentum_settings', array());
+        $value = isset($settings['toc_label']) ? $settings['toc_label'] : 'In This Article...';
+        ?>
+        <input 
+            type="text" 
+            name="vernal_contentum_settings[toc_label]" 
+            value="<?php echo esc_attr($value); ?>" 
+            class="regular-text"
+        />
+        <p class="description"><?php _e('Label text displayed above the table of contents.', 'vernal-contentum'); ?></p>
+        <?php
+    }
+    
+    public function render_toc_style_field() {
+        $settings = get_option('vernal_contentum_settings', array());
+        $value = isset($settings['toc_style']) ? $settings['toc_style'] : 'bullets';
+        ?>
+        <select name="vernal_contentum_settings[toc_style]">
+            <option value="bullets" <?php selected($value, 'bullets'); ?>><?php _e('Bullets (Unordered List)', 'vernal-contentum'); ?></option>
+            <option value="numbers" <?php selected($value, 'numbers'); ?>><?php _e('Numbers (Ordered List)', 'vernal-contentum'); ?></option>
+        </select>
+        <p class="description"><?php _e('Display style for the table of contents.', 'vernal-contentum'); ?></p>
+        <?php
+    }
+    
+    public function render_show_schema_field() {
+        $settings = get_option('vernal_contentum_settings', array());
+        $value = isset($settings['show_schema']) ? $settings['show_schema'] : 0;
+        ?>
+        <label>
+            <input 
+                type="checkbox" 
+                name="vernal_contentum_settings[show_schema]" 
+                value="1" 
+                <?php checked($value, 1); ?>
+            />
+            <?php _e('Enable Schema.org JSON-LD markup', 'vernal-contentum'); ?>
+        </label>
+        <p class="description"><?php _e('Adds structured data (Article schema, BreadcrumbList) to posts and pages for better SEO.', 'vernal-contentum'); ?></p>
+        <?php
+    }
+    
+    public function render_use_site_logo_field() {
+        $settings = get_option('vernal_contentum_settings', array());
+        $value = isset($settings['use_site_logo']) ? $settings['use_site_logo'] : 1;
+        ?>
+        <label>
+            <input 
+                type="checkbox" 
+                name="vernal_contentum_settings[use_site_logo]" 
+                value="1" 
+                <?php checked($value, 1); ?>
+            />
+            <?php _e('Use WordPress site logo in schema', 'vernal-contentum'); ?>
+        </label>
+        <p class="description"><?php _e('If unchecked, use the custom logo URL below.', 'vernal-contentum'); ?></p>
+        <?php
+    }
+    
+    public function render_logo_url_field() {
+        $settings = get_option('vernal_contentum_settings', array());
+        $value = isset($settings['logo_url']) ? $settings['logo_url'] : '';
+        ?>
+        <input 
+            type="url" 
+            name="vernal_contentum_settings[logo_url]" 
+            value="<?php echo esc_attr($value); ?>" 
+            class="regular-text"
+            placeholder="https://example.com/logo.png"
+        />
+        <p class="description"><?php _e('Custom logo URL for schema markup (used when "Use Site Logo" is unchecked).', 'vernal-contentum'); ?></p>
         <?php
     }
     
