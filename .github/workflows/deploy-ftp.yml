@@ -15,6 +15,22 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       
+      - name: Verify secrets are set
+        run: |
+          if [ -z "${{ secrets.SERVER }}" ]; then
+            echo "ERROR: SERVER secret is not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.USERNAME }}" ]; then
+            echo "ERROR: USERNAME secret is not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.PASSWORD }}" ]; then
+            echo "ERROR: PASSWORD secret is not set"
+            exit 1
+          fi
+          echo "✓ All secrets are configured"
+      
       - name: Deploy via FTP
         uses: SamKirkland/FTP-Deploy-Action@4.3.0
         with:
@@ -27,5 +43,10 @@ jobs:
             **/.github/**
             **/.gitignore
             **/README.md
+            **/DEPLOYMENT.md
+            **/VERSIONING.md
             **/.DS_Store
+          dangerous-clean-slate: false
+          dry-run: false
+          log-level: verbose
 
