@@ -8,7 +8,7 @@
  * License: GPL v2 or later
  * Text Domain: vernal-contentum
  * 
- * Last updated: Fixing SERVER_PATH to include folder name
+ * Last updated: Deployment folder created - deploying files now
  */
 
 // Exit if accessed directly
