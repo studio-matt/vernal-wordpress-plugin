@@ -8,7 +8,7 @@
  * License: GPL v2 or later
  * Text Domain: vernal-contentum
  * 
- * Last updated: Testing deployment with IP address (50.6.198.220)
+ * Last updated: Testing deployment with IP address - attempt 2
  */
 
 // Exit if accessed directly
