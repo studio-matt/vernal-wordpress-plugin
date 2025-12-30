@@ -55,8 +55,33 @@ jobs:
           }
           echo "✓ Server added to known hosts"
       
+      - name: Test SSH connection
+        run: |
+          echo "Testing SSH connection..."
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
+            "echo 'SSH connection successful'" || {
+            echo "::error::SSH connection failed"
+            echo "Please verify:"
+            echo "1. SERVER_HOST is correct: ${{ secrets.SERVER_HOST }}"
+            echo "2. SERVER_USER is correct: ${{ secrets.SERVER_USER }}"
+            echo "3. SSH_PRIVATE_KEY matches the public key on the server"
+            exit 1
+          }
+
+      - name: Verify server path exists
+        run: |
+          echo "Checking if server path exists..."
+          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
+            "test -d '${{ secrets.SERVER_PATH }}' || mkdir -p '${{ secrets.SERVER_PATH }}'" || {
+            echo "::error::Cannot create or access SERVER_PATH: ${{ secrets.SERVER_PATH }}"
+            exit 1
+          }
+          echo "✓ Server path verified: ${{ secrets.SERVER_PATH }}"
+
       - name: Deploy files via rsync
         run: |
+          echo "Deploying files to: ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:${{ secrets.SERVER_PATH }}"
           rsync -avz --delete \
             --exclude='.git' \
             --exclude='.git/**' \
@@ -66,11 +91,22 @@ jobs:
             --exclude='DEPLOYMENT.md' \
             --exclude='VERSIONING.md' \
             --exclude='TROUBLESHOOTING.md' \
+            --exclude='UPDATE_SYSTEM.md' \
+            --exclude='SECRETS_SETUP.md' \
             --exclude='.DS_Store' \
-            ./ ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:${{ secrets.SERVER_PATH }}
+            ./ ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:${{ secrets.SERVER_PATH }} || {
+            echo "::error::rsync deployment failed"
+            exit 1
+          }
+          echo "✓ Files deployed successfully"
       
       - name: Verify deployment
         run: |
+          echo "Verifying deployed files..."
           ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
-            "ls -la ${{ secrets.SERVER_PATH }}"
+            "ls -la '${{ secrets.SERVER_PATH }}' | head -20" || {
+            echo "::error::Cannot verify deployment"
+            exit 1
+          }
+          echo "✓ Deployment verified"
 
