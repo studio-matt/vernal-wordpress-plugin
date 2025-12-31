@@ -26,6 +26,7 @@ class Vernal_Settings {
     }
     
     public function add_admin_menu() {
+        // Main menu page
         add_menu_page(
             __('Vernal Contentum', 'vernal-contentum'),
             __('Vernal Contentum', 'vernal-contentum'),
@@ -34,6 +35,36 @@ class Vernal_Settings {
             array($this, 'render_settings_page'),
             'dashicons-admin-links',
             30
+        );
+        
+        // Submenu: Connection (same as main page)
+        add_submenu_page(
+            'vernal-contentum',
+            __('Connection', 'vernal-contentum'),
+            __('Connection', 'vernal-contentum'),
+            'manage_options',
+            'vernal-contentum',
+            array($this, 'render_settings_page')
+        );
+        
+        // Submenu: Sitemap & Schema Settings
+        add_submenu_page(
+            'vernal-contentum',
+            __('Sitemap & Schema', 'vernal-contentum'),
+            __('Sitemap & Schema', 'vernal-contentum'),
+            'manage_options',
+            'vernal-contentum-schema',
+            array($this, 'render_schema_settings_page')
+        );
+        
+        // Submenu: API Endpoints
+        add_submenu_page(
+            'vernal-contentum',
+            __('API Endpoints', 'vernal-contentum'),
+            __('API Endpoints', 'vernal-contentum'),
+            'manage_options',
+            'vernal-contentum-api',
+            array($this, 'render_api_endpoints_page')
         );
     }
     
@@ -79,19 +110,19 @@ class Vernal_Settings {
             'vernal_connection_section'
         );
         
-        // Sitemap/Schema Settings Section
+        // Sitemap/Schema Settings Section (for schema settings page)
         add_settings_section(
             'vernal_sitemap_section',
             __('Sitemap & Schema Settings', 'vernal-contentum'),
             array($this, 'render_sitemap_section'),
-            'vernal-contentum'
+            'vernal-contentum-schema'
         );
         
         add_settings_field(
             'vernal_show_toc',
             __('Show Table of Contents', 'vernal-contentum'),
             array($this, 'render_show_toc_field'),
-            'vernal-contentum',
+            'vernal-contentum-schema',
             'vernal_sitemap_section'
         );
         
@@ -99,7 +130,7 @@ class Vernal_Settings {
             'vernal_toc_label',
             __('TOC Label', 'vernal-contentum'),
             array($this, 'render_toc_label_field'),
-            'vernal-contentum',
+            'vernal-contentum-schema',
             'vernal_sitemap_section'
         );
         
@@ -107,7 +138,7 @@ class Vernal_Settings {
             'vernal_toc_style',
             __('TOC Style', 'vernal-contentum'),
             array($this, 'render_toc_style_field'),
-            'vernal-contentum',
+            'vernal-contentum-schema',
             'vernal_sitemap_section'
         );
         
@@ -115,7 +146,7 @@ class Vernal_Settings {
             'vernal_show_schema',
             __('Show Schema JSON-LD', 'vernal-contentum'),
             array($this, 'render_show_schema_field'),
-            'vernal-contentum',
+            'vernal-contentum-schema',
             'vernal_sitemap_section'
         );
         
@@ -123,7 +154,7 @@ class Vernal_Settings {
             'vernal_use_site_logo',
             __('Use Site Logo', 'vernal-contentum'),
             array($this, 'render_use_site_logo_field'),
-            'vernal-contentum',
+            'vernal-contentum-schema',
             'vernal_sitemap_section'
         );
         
@@ -131,7 +162,7 @@ class Vernal_Settings {
             'vernal_logo_url',
             __('Custom Logo URL', 'vernal-contentum'),
             array($this, 'render_logo_url_field'),
-            'vernal-contentum',
+            'vernal-contentum-schema',
             'vernal_sitemap_section'
         );
     }
@@ -239,20 +270,120 @@ class Vernal_Settings {
                 submit_button(__('Save Settings', 'vernal-contentum'));
                 ?>
             </form>
+        </div>
+        <?php
+    }
+    
+    /**
+     * Render Schema Settings page
+     */
+    public function render_schema_settings_page() {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+        
+        // Auto-populate logo URL if not set and site logo exists
+        $settings = get_option('vernal_contentum_settings', array());
+        if (empty($settings['logo_url'])) {
+            $custom_logo_id = get_theme_mod('custom_logo');
+            if ($custom_logo_id) {
+                $logo_url = wp_get_attachment_image_url($custom_logo_id, 'full');
+                if ($logo_url) {
+                    $settings['logo_url'] = $logo_url;
+                    update_option('vernal_contentum_settings', $settings);
+                }
+            }
+        }
+        
+        ?>
+        <div class="wrap">
+            <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
             
-            <div class="vernal-info-box" style="background: #fff; border-left: 4px solid #2271b1; padding: 15px; margin: 20px 0;">
-                <h3><?php _e('API Endpoints', 'vernal-contentum'); ?></h3>
-                <ul style="list-style: disc; margin-left: 20px;">
-                    <li><strong>Sitemap:</strong> <code><?php echo esc_url(rest_url('vernal-contentum/v1/sitemap')); ?></code></li>
-                    <li><strong>Categories:</strong> <code><?php echo esc_url(rest_url('vernal-contentum/v1/categories')); ?></code></li>
-                    <li><strong>Authors:</strong> <code><?php echo esc_url(rest_url('vernal-contentum/v1/authors')); ?></code></li>
-                    <li><strong>Create Post:</strong> <code><?php echo esc_url(rest_url('vernal-contentum/v1/posts')); ?></code> (POST)</li>
-                </ul>
-                <p style="margin-top: 10px;">
-                    <strong><?php _e('Authentication:', 'vernal-contentum'); ?></strong> 
-                    <?php _e('Include the API key in the request header:', 'vernal-contentum'); ?>
-                    <code>X-API-Key: <?php echo esc_html($api_key); ?></code>
-                </p>
+            <form action="options.php" method="post">
+                <?php
+                settings_fields('vernal_contentum_settings');
+                do_settings_sections('vernal-contentum-schema');
+                submit_button(__('Save Settings', 'vernal-contentum'));
+                ?>
+            </form>
+        </div>
+        <?php
+    }
+    
+    /**
+     * Render API Endpoints page
+     */
+    public function render_api_endpoints_page() {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+        
+        $api_key = get_option('vernal_contentum_api_key', '');
+        $site_url = get_site_url();
+        
+        ?>
+        <div class="wrap">
+            <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
+            
+            <div class="vernal-info-box" style="background: #fff; border-left: 4px solid #2271b1; padding: 20px; margin: 20px 0; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
+                <h2><?php _e('Available API Endpoints', 'vernal-contentum'); ?></h2>
+                <p><?php _e('Use these endpoints in your Vernal Contentum web app to interact with WordPress:', 'vernal-contentum'); ?></p>
+                
+                <table class="widefat" style="margin-top: 15px;">
+                    <thead>
+                        <tr>
+                            <th style="width: 150px;"><?php _e('Endpoint', 'vernal-contentum'); ?></th>
+                            <th style="width: 80px;"><?php _e('Method', 'vernal-contentum'); ?></th>
+                            <th><?php _e('URL', 'vernal-contentum'); ?></th>
+                            <th><?php _e('Description', 'vernal-contentum'); ?></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Sitemap</strong></td>
+                            <td>GET</td>
+                            <td><code><?php echo esc_url(rest_url('vernal-contentum/v1/sitemap')); ?></code></td>
+                            <td><?php _e('Get comprehensive sitemap data (posts, pages, categories, tags, authors)', 'vernal-contentum'); ?></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Categories</strong></td>
+                            <td>GET</td>
+                            <td><code><?php echo esc_url(rest_url('vernal-contentum/v1/categories')); ?></code></td>
+                            <td><?php _e('Get all post categories for dropdown selection', 'vernal-contentum'); ?></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Authors</strong></td>
+                            <td>GET</td>
+                            <td><code><?php echo esc_url(rest_url('vernal-contentum/v1/authors')); ?></code></td>
+                            <td><?php _e('Get all authors for dropdown selection', 'vernal-contentum'); ?></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Create Post</strong></td>
+                            <td>POST</td>
+                            <td><code><?php echo esc_url(rest_url('vernal-contentum/v1/posts')); ?></code></td>
+                            <td><?php _e('Create a new WordPress post', 'vernal-contentum'); ?></td>
+                        </tr>
+                    </tbody>
+                </table>
+                
+                <div style="margin-top: 20px; padding: 15px; background: #f0f0f1; border-radius: 4px;">
+                    <h3><?php _e('Authentication', 'vernal-contentum'); ?></h3>
+                    <p><?php _e('All API requests require authentication using the API key in the request header:', 'vernal-contentum'); ?></p>
+                    <code style="display: block; padding: 10px; background: #fff; margin-top: 10px;">
+                        X-API-Key: <?php echo esc_html($api_key); ?>
+                    </code>
+                </div>
+                
+                <div style="margin-top: 20px; padding: 15px; background: #fff3cd; border-left: 4px solid #ffb900; border-radius: 4px;">
+                    <h3><?php _e('Example Request', 'vernal-contentum'); ?></h3>
+                    <pre style="background: #fff; padding: 15px; overflow-x: auto; margin-top: 10px;"><code>fetch('<?php echo esc_url(rest_url('vernal-contentum/v1/categories')); ?>', {
+  headers: {
+    'X-API-Key': '<?php echo esc_html($api_key); ?>'
+  }
+})
+.then(response => response.json())
+.then(data => console.log(data));</code></pre>
+                </div>
             </div>
         </div>
         <?php
@@ -370,7 +501,8 @@ class Vernal_Settings {
     
     public function render_show_schema_field() {
         $settings = get_option('vernal_contentum_settings', array());
-        $value = isset($settings['show_schema']) ? $settings['show_schema'] : 0;
+        // Default to enabled (1) for better SEO
+        $value = isset($settings['show_schema']) ? $settings['show_schema'] : 1;
         ?>
         <label>
             <input 
@@ -381,7 +513,7 @@ class Vernal_Settings {
             />
             <?php _e('Enable Schema.org JSON-LD markup', 'vernal-contentum'); ?>
         </label>
-        <p class="description"><?php _e('Adds structured data (Article schema, BreadcrumbList) to posts and pages for better SEO.', 'vernal-contentum'); ?></p>
+        <p class="description"><?php _e('Adds structured data (Article schema, BreadcrumbList) to posts and pages for better SEO. Enabled by default.', 'vernal-contentum'); ?></p>
         <?php
     }
     
@@ -404,7 +536,25 @@ class Vernal_Settings {
     
     public function render_logo_url_field() {
         $settings = get_option('vernal_contentum_settings', array());
-        $value = isset($settings['logo_url']) ? $settings['logo_url'] : '';
+        
+        // Auto-populate with site logo if not set
+        if (empty($settings['logo_url'])) {
+            $custom_logo_id = get_theme_mod('custom_logo');
+            if ($custom_logo_id) {
+                $logo_url = wp_get_attachment_image_url($custom_logo_id, 'full');
+                if ($logo_url) {
+                    $settings['logo_url'] = $logo_url;
+                    $value = $logo_url;
+                } else {
+                    $value = '';
+                }
+            } else {
+                $value = '';
+            }
+        } else {
+            $value = $settings['logo_url'];
+        }
+        
         ?>
         <input 
             type="url" 
@@ -413,8 +563,29 @@ class Vernal_Settings {
             class="regular-text"
             placeholder="https://example.com/logo.png"
         />
-        <p class="description"><?php _e('Custom logo URL for schema markup (used when "Use Site Logo" is unchecked).', 'vernal-contentum'); ?></p>
+        <button type="button" class="button" onclick="this.previousElementSibling.value='<?php echo esc_js($this->get_site_logo_url()); ?>';">
+            <?php _e('Use Site Logo', 'vernal-contentum'); ?>
+        </button>
+        <p class="description">
+            <?php _e('Logo URL for schema markup (used when "Use Site Logo" is unchecked).', 'vernal-contentum'); ?>
+            <?php if ($this->get_site_logo_url()): ?>
+                <br><strong><?php _e('Current site logo:', 'vernal-contentum'); ?></strong> 
+                <code><?php echo esc_html($this->get_site_logo_url()); ?></code>
+            <?php endif; ?>
+        </p>
         <?php
+    }
+    
+    /**
+     * Get site logo URL
+     */
+    private function get_site_logo_url() {
+        $custom_logo_id = get_theme_mod('custom_logo');
+        if ($custom_logo_id) {
+            $logo_url = wp_get_attachment_image_url($custom_logo_id, 'full');
+            return $logo_url ? $logo_url : '';
+        }
+        return '';
     }
     
     public function enqueue_admin_scripts($hook) {

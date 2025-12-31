@@ -129,7 +129,9 @@ class Vernal_Schema {
         }
         
         $options = get_option('vernal_contentum_settings', array());
-        if (empty($options['show_schema'])) {
+        // Default to enabled (1) if not set
+        $show_schema = isset($options['show_schema']) ? $options['show_schema'] : 1;
+        if (empty($show_schema)) {
             return;
         }
         
@@ -231,7 +233,9 @@ class Vernal_Schema {
         }
         
         $options = get_option('vernal_contentum_settings', array());
-        if (empty($options['show_schema'])) {
+        // Default to enabled (1) if not set
+        $show_schema = isset($options['show_schema']) ? $options['show_schema'] : 1;
+        if (empty($show_schema)) {
             return;
         }
         
