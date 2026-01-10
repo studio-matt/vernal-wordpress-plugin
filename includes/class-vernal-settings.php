@@ -717,13 +717,30 @@ class Vernal_Settings {
         $site_url = get_site_url();
         $api_key = get_option('vernal_contentum_api_key', '');
         
+        // Get current WordPress admin user (for app password generation)
+        $current_user = wp_get_current_user();
+        $username = $current_user->user_login;
+        
+        // Generate or get app password (application password for REST API)
+        // WordPress application passwords are the recommended way for API auth
+        // For now, we'll use the API key as the app password equivalent
+        $app_password = $api_key; // This is what Vernal will use to authenticate to WP
+        
+        // Format as JSON for easy pasting
         $data = array(
             'site_url' => $site_url,
+            'username' => $username,
             'api_key' => $api_key,
+            'app_password' => $app_password,
             'api_endpoint' => rest_url('vernal-contentum/v1/')
         );
         
-        wp_send_json_success($data);
+        // Return both JSON (for programmatic use) and formatted string (for manual copy)
+        wp_send_json_success(array(
+            'json' => $data,
+            'formatted' => json_encode($data, JSON_PRETTY_PRINT),
+            'compact' => json_encode($data) // Single line for pasting
+        ));
     }
     
     public function ajax_test_backend_connection() {
