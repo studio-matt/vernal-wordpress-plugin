@@ -52,6 +52,13 @@ class Vernal_API {
             'callback' => array($this, 'create_post'),
             'permission_callback' => array($this, 'check_api_key'),
         ));
+        
+        // Configure backend endpoint (for automatic setup)
+        register_rest_route($namespace, '/configure-backend', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'configure_backend'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
     }
     
     /**
