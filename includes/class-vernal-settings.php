@@ -79,30 +79,6 @@ class Vernal_Settings {
         );
         
         add_settings_field(
-            'vernal_webapp_url',
-            __('Vernal Contentum Web App URL', 'vernal-contentum'),
-            array($this, 'render_webapp_url_field'),
-            'vernal-contentum',
-            'vernal_connection_section'
-        );
-        
-        add_settings_field(
-            'vernal_username',
-            __('Username', 'vernal-contentum'),
-            array($this, 'render_username_field'),
-            'vernal-contentum',
-            'vernal_connection_section'
-        );
-        
-        add_settings_field(
-            'vernal_password',
-            __('Password', 'vernal-contentum'),
-            array($this, 'render_password_field'),
-            'vernal-contentum',
-            'vernal_connection_section'
-        );
-        
-        add_settings_field(
             'vernal_api_key',
             __('API Key', 'vernal-contentum'),
             array($this, 'render_api_key_field'),
@@ -257,7 +233,7 @@ class Vernal_Settings {
             
             <div class="vernal-connection-box" style="background: #fff; border: 1px solid #ccd0d4; padding: 20px; margin: 20px 0; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
                 <h2><?php _e('Quick Connection Setup', 'vernal-contentum'); ?></h2>
-                <p><?php _e('Copy the connection data below and paste it into your Vernal Contentum web app dashboard:', 'vernal-contentum'); ?></p>
+                <p><?php _e('Copy the connection data below and paste it into your Vernal dashboard to connect this WordPress site:', 'vernal-contentum'); ?></p>
                 
                 <div style="margin: 15px 0;">
                     <label for="vernal-connection-data" style="display: block; margin-bottom: 5px; font-weight: 600;">
@@ -355,7 +331,7 @@ class Vernal_Settings {
             
             <div class="vernal-info-box" style="background: #fff; border-left: 4px solid #2271b1; padding: 20px; margin: 20px 0; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
                 <h2><?php _e('Available API Endpoints', 'vernal-contentum'); ?></h2>
-                <p><?php _e('Use these endpoints in your Vernal Contentum web app to interact with WordPress:', 'vernal-contentum'); ?></p>
+                <p><?php _e('Use these endpoints in Vernal to interact with WordPress:', 'vernal-contentum'); ?></p>
                 
                 <table class="widefat" style="margin-top: 15px;">
                     <thead>
@@ -418,49 +394,7 @@ class Vernal_Settings {
     }
     
     public function render_connection_section() {
-        echo '<p>' . __('Configure your connection to the Vernal Contentum web app.', 'vernal-contentum') . '</p>';
-    }
-    
-    public function render_webapp_url_field() {
-        $settings = get_option('vernal_contentum_settings', array());
-        $value = isset($settings['webapp_url']) ? $settings['webapp_url'] : '';
-        ?>
-        <input 
-            type="url" 
-            name="vernal_contentum_settings[webapp_url]" 
-            value="<?php echo esc_attr($value); ?>" 
-            class="regular-text"
-            placeholder="https://app.vernalcontentum.com"
-        />
-        <p class="description"><?php _e('The URL of your Vernal Contentum web app.', 'vernal-contentum'); ?></p>
-        <?php
-    }
-    
-    public function render_username_field() {
-        $settings = get_option('vernal_contentum_settings', array());
-        $value = isset($settings['username']) ? $settings['username'] : '';
-        ?>
-        <input 
-            type="text" 
-            name="vernal_contentum_settings[username]" 
-            value="<?php echo esc_attr($value); ?>" 
-            class="regular-text"
-        />
-        <p class="description"><?php _e('Your Vernal Contentum username.', 'vernal-contentum'); ?></p>
-        <?php
-    }
-    
-    public function render_password_field() {
-        ?>
-        <input 
-            type="password" 
-            name="vernal_contentum_settings[password]" 
-            value="" 
-            class="regular-text"
-            placeholder="<?php _e('Leave blank to keep current password', 'vernal-contentum'); ?>"
-        />
-        <p class="description"><?php _e('Your Vernal Contentum password. Leave blank to keep the current password.', 'vernal-contentum'); ?></p>
-        <?php
+        echo '<p>' . __('Configure your connection to the Vernal backend API.', 'vernal-contentum') . '</p>';
     }
     
     public function render_api_key_field() {
@@ -476,7 +410,7 @@ class Vernal_Settings {
         <button type="button" class="button" onclick="this.previousElementSibling.select(); document.execCommand('copy');">
             <?php _e('Copy', 'vernal-contentum'); ?>
         </button>
-        <p class="description"><?php _e('This API key is used to authenticate requests from your Vernal Contentum web app (inbound).', 'vernal-contentum'); ?></p>
+        <p class="description"><?php _e('This API key is used to authenticate requests from Vernal to WordPress (inbound).', 'vernal-contentum'); ?></p>
         <?php
     }
     
