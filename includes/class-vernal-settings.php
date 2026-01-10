@@ -47,6 +47,16 @@ class Vernal_Settings {
             array($this, 'render_settings_page')
         );
         
+        // Submenu: Content Integration (Sitemap & Categories) - Second position
+        add_submenu_page(
+            'vernal-contentum',
+            __('Content Integration', 'vernal-contentum'),
+            __('Content Integration', 'vernal-contentum'),
+            'manage_options',
+            'vernal-contentum-integration',
+            array($this, 'render_integration_page')
+        );
+        
         // Submenu: Sitemap & Schema Settings
         add_submenu_page(
             'vernal-contentum',
@@ -57,7 +67,7 @@ class Vernal_Settings {
             array($this, 'render_schema_settings_page')
         );
         
-        // Submenu: API Endpoints
+        // Submenu: API Endpoints - Last position
         add_submenu_page(
             'vernal-contentum',
             __('API Endpoints', 'vernal-contentum'),
@@ -65,16 +75,6 @@ class Vernal_Settings {
             'manage_options',
             'vernal-contentum-api',
             array($this, 'render_api_endpoints_page')
-        );
-        
-        // Submenu: Content Integration (Sitemap & Categories)
-        add_submenu_page(
-            'vernal-contentum',
-            __('Content Integration', 'vernal-contentum'),
-            __('Content Integration', 'vernal-contentum'),
-            'manage_options',
-            'vernal-contentum-integration',
-            array($this, 'render_integration_page')
         );
     }
     
