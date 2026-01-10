@@ -29,6 +29,43 @@
         $('#vernal-connection-data').on('click', function() {
             $(this).select();
         });
+        
+        // Test backend connection button
+        $('#test-backend-connection').on('click', function() {
+            var $button = $(this);
+            var $status = $('#backend-connection-status');
+            var originalText = $button.text();
+            
+            // Disable button and show loading
+            $button.prop('disabled', true).text('Testing...');
+            $status.html('<span style="color: #2271b1;">⏳ Testing connection...</span>');
+            
+            // Make AJAX request
+            $.ajax({
+                url: vernalContentum.ajax_url,
+                type: 'POST',
+                data: {
+                    action: 'vernal_test_backend_connection',
+                    nonce: vernalContentum.nonce
+                },
+                success: function(response) {
+                    if (response.success) {
+                        $status.html('<span style="color: #46b450;">✓ ' + response.data.message + '</span>');
+                        if (response.data.data && response.data.data.user) {
+                            $status.append('<br><small>User: ' + response.data.data.user.username + ' (' + response.data.data.user.email + ')</small>');
+                        }
+                    } else {
+                        $status.html('<span style="color: #dc3232;">✗ ' + (response.data.message || 'Connection failed') + '</span>');
+                    }
+                },
+                error: function(xhr, status, error) {
+                    $status.html('<span style="color: #dc3232;">✗ Connection error: ' + error + '</span>');
+                },
+                complete: function() {
+                    $button.prop('disabled', false).text(originalText);
+                }
+            });
+        });
     });
     
 })(jQuery);

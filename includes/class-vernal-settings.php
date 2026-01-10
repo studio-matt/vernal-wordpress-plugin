@@ -110,6 +110,23 @@ class Vernal_Settings {
             'vernal_connection_section'
         );
         
+        // Backend connection settings (for WordPress → Backend authentication)
+        add_settings_field(
+            'vernal_backend_url',
+            __('Backend API URL', 'vernal-contentum'),
+            array($this, 'render_backend_url_field'),
+            'vernal-contentum',
+            'vernal_connection_section'
+        );
+        
+        add_settings_field(
+            'vernal_backend_api_key',
+            __('Backend API Key', 'vernal-contentum'),
+            array($this, 'render_backend_api_key_field'),
+            'vernal-contentum',
+            'vernal_connection_section'
+        );
+        
         // Sitemap/Schema Settings Section (for schema settings page)
         add_settings_section(
             'vernal_sitemap_section',
@@ -182,6 +199,17 @@ class Vernal_Settings {
             // Only update if password is not empty (to allow keeping existing password)
             if (!empty($input['password'])) {
                 $sanitized['password'] = base64_encode($input['password']); // Basic encoding, consider encryption
+            }
+        }
+        
+        if (isset($input['backend_url'])) {
+            $sanitized['backend_url'] = esc_url_raw($input['backend_url']);
+        }
+        
+        if (isset($input['backend_api_key'])) {
+            // Only update if API key is not empty (to allow keeping existing key)
+            if (!empty($input['backend_api_key'])) {
+                $sanitized['backend_api_key'] = sanitize_text_field($input['backend_api_key']);
             }
         }
         
@@ -448,7 +476,78 @@ class Vernal_Settings {
         <button type="button" class="button" onclick="this.previousElementSibling.select(); document.execCommand('copy');">
             <?php _e('Copy', 'vernal-contentum'); ?>
         </button>
-        <p class="description"><?php _e('This API key is used to authenticate requests from your Vernal Contentum web app.', 'vernal-contentum'); ?></p>
+        <p class="description"><?php _e('This API key is used to authenticate requests from your Vernal Contentum web app (inbound).', 'vernal-contentum'); ?></p>
+        <?php
+    }
+    
+    public function render_backend_url_field() {
+        $settings = get_option('vernal_contentum_settings', array());
+        // Check wp-config.php first (recommended), fallback to wp_options
+        $value = defined('VERNAL_BACKEND_URL') 
+            ? VERNAL_BACKEND_URL 
+            : (isset($settings['backend_url']) ? $settings['backend_url'] : '');
+        $is_from_config = defined('VERNAL_BACKEND_URL');
+        ?>
+        <input 
+            type="url" 
+            name="vernal_contentum_settings[backend_url]" 
+            value="<?php echo esc_attr($value); ?>" 
+            class="regular-text"
+            placeholder="https://themachine.vernalcontentum.com"
+            <?php echo $is_from_config ? 'readonly' : ''; ?>
+        />
+        <?php if ($is_from_config): ?>
+            <span class="description" style="color: #46b450;">
+                <?php _e('✓ Set via wp-config.php constant', 'vernal-contentum'); ?>
+            </span>
+        <?php endif; ?>
+        <p class="description">
+            <?php _e('The backend API URL for WordPress → Backend authentication (outbound).', 'vernal-contentum'); ?>
+            <?php if (!$is_from_config): ?>
+                <br><strong><?php _e('Recommended:', 'vernal-contentum'); ?></strong> 
+                <?php _e('Set VERNAL_BACKEND_URL constant in wp-config.php for better security.', 'vernal-contentum'); ?>
+            <?php endif; ?>
+        </p>
+        <?php
+    }
+    
+    public function render_backend_api_key_field() {
+        $settings = get_option('vernal_contentum_settings', array());
+        // Check wp-config.php first (recommended), fallback to wp_options
+        $value = defined('VERNAL_BACKEND_API_KEY') 
+            ? VERNAL_BACKEND_API_KEY 
+            : (isset($settings['backend_api_key']) ? $settings['backend_api_key'] : '');
+        $is_from_config = defined('VERNAL_BACKEND_API_KEY');
+        $has_value = !empty($value);
+        ?>
+        <input 
+            type="password" 
+            name="vernal_contentum_settings[backend_api_key]" 
+            value="" 
+            class="regular-text"
+            placeholder="<?php _e('Enter API key to update, or leave blank to keep current', 'vernal-contentum'); ?>"
+            <?php echo $is_from_config ? 'readonly' : ''; ?>
+        />
+        <?php if ($is_from_config): ?>
+            <span class="description" style="color: #46b450;">
+                <?php _e('✓ Set via wp-config.php constant', 'vernal-contentum'); ?>
+            </span>
+        <?php elseif ($has_value): ?>
+            <span class="description" style="color: #2271b1;">
+                <?php _e('✓ API key is configured (hidden for security)', 'vernal-contentum'); ?>
+            </span>
+        <?php endif; ?>
+        <button type="button" class="button" id="test-backend-connection" style="margin-left: 10px;">
+            <?php _e('Test Connection', 'vernal-contentum'); ?>
+        </button>
+        <span id="backend-connection-status" style="margin-left: 10px;"></span>
+        <p class="description">
+            <?php _e('API key for WordPress → Backend authentication (outbound). Get this from Backend Admin → Plugins → API Keys.', 'vernal-contentum'); ?>
+            <?php if (!$is_from_config): ?>
+                <br><strong><?php _e('Recommended:', 'vernal-contentum'); ?></strong> 
+                <?php _e('Set VERNAL_BACKEND_API_KEY constant in wp-config.php for better security.', 'vernal-contentum'); ?>
+            <?php endif; ?>
+        </p>
         <?php
     }
     
@@ -600,6 +699,12 @@ class Vernal_Settings {
             VERNAL_CONTENTUM_VERSION,
             true
         );
+        
+        // Localize script for AJAX
+        wp_localize_script('vernal-contentum-admin', 'vernalContentum', array(
+            'ajax_url' => admin_url('admin-ajax.php'),
+            'nonce' => wp_create_nonce('vernal_contentum_nonce')
+        ));
     }
     
     public function ajax_copy_connection_data() {
@@ -619,6 +724,29 @@ class Vernal_Settings {
         );
         
         wp_send_json_success($data);
+    }
+    
+    public function ajax_test_backend_connection() {
+        check_ajax_referer('vernal_contentum_nonce', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => __('Unauthorized', 'vernal-contentum')));
+        }
+        
+        // Test the connection
+        $result = Vernal_Backend_API::test_connection();
+        
+        if (is_wp_error($result)) {
+            wp_send_json_error(array(
+                'message' => $result->get_error_message(),
+                'code' => $result->get_error_code()
+            ));
+        }
+        
+        wp_send_json_success(array(
+            'message' => __('Connection successful!', 'vernal-contentum'),
+            'data' => $result
+        ));
     }
 }
 
