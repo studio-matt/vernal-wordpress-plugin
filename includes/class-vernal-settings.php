@@ -66,16 +66,51 @@ class Vernal_Settings {
             'vernal-contentum-api',
             array($this, 'render_api_endpoints_page')
         );
+        
+        // Submenu: Content Integration (Sitemap & Categories)
+        add_submenu_page(
+            'vernal-contentum',
+            __('Content Integration', 'vernal-contentum'),
+            __('Content Integration', 'vernal-contentum'),
+            'manage_options',
+            'vernal-contentum-integration',
+            array($this, 'render_integration_page')
+        );
     }
     
     public function register_settings() {
         register_setting('vernal_contentum_settings', 'vernal_contentum_settings', array($this, 'sanitize_settings'));
+        register_setting('vernal_contentum_integration', 'vernal_contentum_integration', array($this, 'sanitize_integration_settings'));
         
         add_settings_section(
             'vernal_connection_section',
             __('Connection Settings', 'vernal-contentum'),
             array($this, 'render_connection_section'),
             'vernal-contentum'
+        );
+        
+        // Integration settings section
+        add_settings_section(
+            'vernal_integration_section',
+            __('Content Integration Settings', 'vernal-contentum'),
+            array($this, 'render_integration_section'),
+            'vernal-contentum-integration'
+        );
+        
+        add_settings_field(
+            'vernal_enable_sitemap',
+            __('Enable Sitemap Exposure', 'vernal-contentum'),
+            array($this, 'render_enable_sitemap_field'),
+            'vernal-contentum-integration',
+            'vernal_integration_section'
+        );
+        
+        add_settings_field(
+            'vernal_enable_categories',
+            __('Enable Category Exposure', 'vernal-contentum'),
+            array($this, 'render_enable_categories_field'),
+            'vernal-contentum-integration',
+            'vernal_integration_section'
         );
         
         add_settings_field(
@@ -244,11 +279,18 @@ class Vernal_Settings {
                         readonly 
                         style="width: 100%; height: 120px; font-family: monospace; padding: 10px;"
                     ><?php 
+                        // Format matching Infinite Web: 4 fields for easy paste
+                        $wp_admin_url = trailingslashit($site_url) . 'wp-admin/';
                         echo esc_textarea(json_encode(array(
+                            'wp_admin_url' => $wp_admin_url,
+                            'website_url' => $site_url,
+                            'admin_username' => $wp_username,
+                            'activation_key' => $api_key,
+                            // Legacy fields for backward compatibility
                             'site_url' => $site_url,
                             'username' => $wp_username,
                             'api_key' => $api_key,
-                            'app_password' => $api_key, // Alias for compatibility
+                            'app_password' => $api_key,
                             'api_endpoint' => rest_url('vernal-contentum/v1/')
                         ), JSON_PRETTY_PRINT));
                     ?></textarea>
@@ -390,6 +432,85 @@ class Vernal_Settings {
                 </div>
             </div>
         </div>
+        <?php
+    }
+    
+    /**
+     * Render Content Integration page
+     */
+    public function render_integration_page() {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+        
+        ?>
+        <div class="wrap">
+            <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
+            
+            <div class="vernal-info-box" style="background: #fff; border-left: 4px solid #2271b1; padding: 20px; margin: 20px 0; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
+                <h2><?php _e('Content Integration with Vernal', 'vernal-contentum'); ?></h2>
+                <p><?php _e('Enable these features to allow Vernal to access your WordPress content for better content planning and automated posting.', 'vernal-contentum'); ?></p>
+            </div>
+            
+            <form action="options.php" method="post">
+                <?php
+                settings_fields('vernal_contentum_integration');
+                do_settings_sections('vernal-contentum-integration');
+                submit_button(__('Save Settings', 'vernal-contentum'));
+                ?>
+            </form>
+        </div>
+        <?php
+    }
+    
+    public function render_integration_section() {
+        echo '<p>' . __('Configure which content data Vernal can access from your WordPress site.', 'vernal-contentum') . '</p>';
+    }
+    
+    public function render_enable_sitemap_field() {
+        $integration = get_option('vernal_contentum_integration', array());
+        $value = isset($integration['enable_sitemap']) ? $integration['enable_sitemap'] : 0;
+        $site_url = get_site_url();
+        ?>
+        <label>
+        <input 
+                type="checkbox" 
+                name="vernal_contentum_integration[enable_sitemap]" 
+                value="1" 
+                <?php checked($value, 1); ?>
+            />
+            <?php _e('Enable sitemap exposure to Vernal', 'vernal-contentum'); ?>
+        </label>
+        <p class="description">
+            <?php _e('When enabled, Vernal can access your sitemap data to analyze content coverage and identify gaps. This will also pre-populate the Site Base URL in Site Builder campaigns.', 'vernal-contentum'); ?>
+            <?php if ($value): ?>
+                <br><strong><?php _e('Sitemap URL:', 'vernal-contentum'); ?></strong> 
+                <code><?php echo esc_url(rest_url('vernal-contentum/v1/sitemap')); ?></code>
+            <?php endif; ?>
+        </p>
+        <?php
+    }
+    
+    public function render_enable_categories_field() {
+        $integration = get_option('vernal_contentum_integration', array());
+        $value = isset($integration['enable_categories']) ? $integration['enable_categories'] : 0;
+        ?>
+        <label>
+        <input 
+                type="checkbox" 
+                name="vernal_contentum_integration[enable_categories]" 
+                value="1" 
+                <?php checked($value, 1); ?>
+            />
+            <?php _e('Enable category exposure to Vernal', 'vernal-contentum'); ?>
+        </label>
+        <p class="description">
+            <?php _e('When enabled, your WordPress categories will be available in Vernal for content planning. Content created in Vernal can be automatically posted to the selected category.', 'vernal-contentum'); ?>
+            <?php if ($value): ?>
+                <br><strong><?php _e('Categories API:', 'vernal-contentum'); ?></strong> 
+                <code><?php echo esc_url(rest_url('vernal-contentum/v1/categories')); ?></code>
+            <?php endif; ?>
+        </p>
         <?php
     }
     
@@ -698,6 +819,85 @@ class Vernal_Settings {
             'message' => __('Connection successful!', 'vernal-contentum'),
             'data' => $result
         ));
+    }
+    
+    /**
+     * Render Content Integration page
+     */
+    public function render_integration_page() {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+        
+        ?>
+        <div class="wrap">
+            <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
+            
+            <div class="vernal-info-box" style="background: #fff; border-left: 4px solid #2271b1; padding: 20px; margin: 20px 0; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
+                <h2><?php _e('Content Integration with Vernal', 'vernal-contentum'); ?></h2>
+                <p><?php _e('Enable these features to allow Vernal to access your WordPress content for better content planning and automated posting.', 'vernal-contentum'); ?></p>
+            </div>
+            
+            <form action="options.php" method="post">
+                <?php
+                settings_fields('vernal_contentum_integration');
+                do_settings_sections('vernal-contentum-integration');
+                submit_button(__('Save Settings', 'vernal-contentum'));
+                ?>
+            </form>
+        </div>
+        <?php
+    }
+    
+    public function render_integration_section() {
+        echo '<p>' . __('Configure which content data Vernal can access from your WordPress site.', 'vernal-contentum') . '</p>';
+    }
+    
+    public function render_enable_sitemap_field() {
+        $integration = get_option('vernal_contentum_integration', array());
+        $value = isset($integration['enable_sitemap']) ? $integration['enable_sitemap'] : 0;
+        $site_url = get_site_url();
+        ?>
+        <label>
+            <input 
+                type="checkbox" 
+                name="vernal_contentum_integration[enable_sitemap]" 
+                value="1" 
+                <?php checked($value, 1); ?>
+            />
+            <?php _e('Enable sitemap exposure to Vernal', 'vernal-contentum'); ?>
+        </label>
+        <p class="description">
+            <?php _e('When enabled, Vernal can access your sitemap data to analyze content coverage and identify gaps. This will also pre-populate the Site Base URL in Site Builder campaigns.', 'vernal-contentum'); ?>
+            <?php if ($value): ?>
+                <br><strong><?php _e('Sitemap URL:', 'vernal-contentum'); ?></strong> 
+                <code><?php echo esc_url(rest_url('vernal-contentum/v1/sitemap')); ?></code>
+            <?php endif; ?>
+        </p>
+        <?php
+    }
+    
+    public function render_enable_categories_field() {
+        $integration = get_option('vernal_contentum_integration', array());
+        $value = isset($integration['enable_categories']) ? $integration['enable_categories'] : 0;
+        ?>
+        <label>
+            <input 
+                type="checkbox" 
+                name="vernal_contentum_integration[enable_categories]" 
+                value="1" 
+                <?php checked($value, 1); ?>
+            />
+            <?php _e('Enable category exposure to Vernal', 'vernal-contentum'); ?>
+        </label>
+        <p class="description">
+            <?php _e('When enabled, your WordPress categories will be available in Vernal for content planning. Content created in Vernal can be automatically posted to the selected category.', 'vernal-contentum'); ?>
+            <?php if ($value): ?>
+                <br><strong><?php _e('Categories API:', 'vernal-contentum'); ?></strong> 
+                <code><?php echo esc_url(rest_url('vernal-contentum/v1/categories')); ?></code>
+            <?php endif; ?>
+        </p>
+        <?php
     }
 }
 
