@@ -252,6 +252,20 @@ class Vernal_Settings {
         return $sanitized;
     }
     
+    public function sanitize_integration_settings($input) {
+        $sanitized = array();
+        
+        if (isset($input['enable_sitemap'])) {
+            $sanitized['enable_sitemap'] = !empty($input['enable_sitemap']) ? 1 : 0;
+        }
+        
+        if (isset($input['enable_categories'])) {
+            $sanitized['enable_categories'] = !empty($input['enable_categories']) ? 1 : 0;
+        }
+        
+        return $sanitized;
+    }
+    
     public function render_settings_page() {
         if (!current_user_can('manage_options')) {
             return;
