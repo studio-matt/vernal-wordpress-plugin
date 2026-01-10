@@ -67,14 +67,14 @@ class Vernal_Settings {
             array($this, 'render_schema_settings_page')
         );
         
-        // Submenu: API Endpoints - Last position
+        // Submenu: Scheduled Content
         add_submenu_page(
             'vernal-contentum',
-            __('API Endpoints', 'vernal-contentum'),
-            __('API Endpoints', 'vernal-contentum'),
+            __('Scheduled Content', 'vernal-contentum'),
+            __('Scheduled Content', 'vernal-contentum'),
             'manage_options',
-            'vernal-contentum-api',
-            array($this, 'render_api_endpoints_page')
+            'vernal-contentum-scheduled',
+            array($this, 'render_scheduled_content_page')
         );
     }
     
@@ -299,13 +299,7 @@ class Vernal_Settings {
                             'wp_admin_url' => $wp_admin_url,
                             'website_url' => $site_url,
                             'admin_username' => $wp_username,
-                            'activation_key' => $api_key,
-                            // Legacy fields for backward compatibility
-                            'site_url' => $site_url,
-                            'username' => $wp_username,
-                            'api_key' => $api_key,
-                            'app_password' => $api_key,
-                            'api_endpoint' => rest_url('vernal-contentum/v1/')
+                            'activation_key' => $api_key
                         ), JSON_PRETTY_PRINT));
                     ?></textarea>
                 </div>
@@ -371,80 +365,120 @@ class Vernal_Settings {
     }
     
     /**
-     * Render API Endpoints page
+     * Render Scheduled Content page
      */
-    public function render_api_endpoints_page() {
+    public function render_scheduled_content_page() {
         if (!current_user_can('manage_options')) {
             return;
         }
         
-        $api_key = get_option('vernal_contentum_api_key', '');
-        $site_url = get_site_url();
+        $settings = get_option('vernal_contentum_settings', array());
+        $backend_url = defined('VERNAL_BACKEND_URL') ? VERNAL_BACKEND_URL : (isset($settings['backend_url']) ? $settings['backend_url'] : '');
+        $backend_api_key = defined('VERNAL_BACKEND_API_KEY') ? VERNAL_BACKEND_API_KEY : (isset($settings['backend_api_key']) ? $settings['backend_api_key'] : '');
+        
+        // Fetch scheduled posts from backend
+        $scheduled_posts = array();
+        $error_message = '';
+        
+        if (!empty($backend_url) && !empty($backend_api_key)) {
+            $api_url = trailingslashit($backend_url) . 'scheduled-posts';
+            $response = wp_remote_get($api_url, array(
+                'headers' => array(
+                    'X-API-Key' => $backend_api_key,
+                    'Content-Type' => 'application/json',
+                ),
+                'timeout' => 30,
+            ));
+            
+            if (!is_wp_error($response)) {
+                $body = wp_remote_retrieve_body($response);
+                $data = json_decode($body, true);
+                
+                if (isset($data['status']) && $data['status'] === 'success' && isset($data['message']['posts'])) {
+                    $scheduled_posts = $data['message']['posts'];
+                } else {
+                    $error_message = __('Failed to fetch scheduled posts. Please check your backend connection settings.', 'vernal-contentum');
+                }
+            } else {
+                $error_message = __('Error connecting to backend: ', 'vernal-contentum') . $response->get_error_message();
+            }
+        } else {
+            $error_message = __('Backend API URL and API Key must be configured to view scheduled content.', 'vernal-contentum');
+        }
         
         ?>
         <div class="wrap">
             <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
             
-            <div class="vernal-info-box" style="background: #fff; border-left: 4px solid #2271b1; padding: 20px; margin: 20px 0; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
-                <h2><?php _e('Available API Endpoints', 'vernal-contentum'); ?></h2>
-                <p><?php _e('Use these endpoints in Vernal to interact with WordPress:', 'vernal-contentum'); ?></p>
-                
-                <table class="widefat" style="margin-top: 15px;">
-                    <thead>
-                        <tr>
-                            <th style="width: 150px;"><?php _e('Endpoint', 'vernal-contentum'); ?></th>
-                            <th style="width: 80px;"><?php _e('Method', 'vernal-contentum'); ?></th>
-                            <th><?php _e('URL', 'vernal-contentum'); ?></th>
-                            <th><?php _e('Description', 'vernal-contentum'); ?></th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr>
-                            <td><strong>Sitemap</strong></td>
-                            <td>GET</td>
-                            <td><code><?php echo esc_url(rest_url('vernal-contentum/v1/sitemap')); ?></code></td>
-                            <td><?php _e('Get comprehensive sitemap data (posts, pages, categories, tags, authors)', 'vernal-contentum'); ?></td>
-                        </tr>
-                        <tr>
-                            <td><strong>Categories</strong></td>
-                            <td>GET</td>
-                            <td><code><?php echo esc_url(rest_url('vernal-contentum/v1/categories')); ?></code></td>
-                            <td><?php _e('Get all post categories for dropdown selection', 'vernal-contentum'); ?></td>
-                        </tr>
-                        <tr>
-                            <td><strong>Authors</strong></td>
-                            <td>GET</td>
-                            <td><code><?php echo esc_url(rest_url('vernal-contentum/v1/authors')); ?></code></td>
-                            <td><?php _e('Get all authors for dropdown selection', 'vernal-contentum'); ?></td>
-                        </tr>
-                        <tr>
-                            <td><strong>Create Post</strong></td>
-                            <td>POST</td>
-                            <td><code><?php echo esc_url(rest_url('vernal-contentum/v1/posts')); ?></code></td>
-                            <td><?php _e('Create a new WordPress post', 'vernal-contentum'); ?></td>
-                        </tr>
-                    </tbody>
-                </table>
-                
-                <div style="margin-top: 20px; padding: 15px; background: #f0f0f1; border-radius: 4px;">
-                    <h3><?php _e('Authentication', 'vernal-contentum'); ?></h3>
-                    <p><?php _e('All API requests require authentication using the API key in the request header:', 'vernal-contentum'); ?></p>
-                    <code style="display: block; padding: 10px; background: #fff; margin-top: 10px;">
-                        X-API-Key: <?php echo esc_html($api_key); ?>
-                    </code>
+            <?php if (!empty($error_message)): ?>
+                <div class="notice notice-error">
+                    <p><?php echo esc_html($error_message); ?></p>
                 </div>
-                
-                <div style="margin-top: 20px; padding: 15px; background: #fff3cd; border-left: 4px solid #ffb900; border-radius: 4px;">
-                    <h3><?php _e('Example Request', 'vernal-contentum'); ?></h3>
-                    <pre style="background: #fff; padding: 15px; overflow-x: auto; margin-top: 10px;"><code>fetch('<?php echo esc_url(rest_url('vernal-contentum/v1/categories')); ?>', {
-  headers: {
-    'X-API-Key': '<?php echo esc_html($api_key); ?>'
-  }
-})
-.then(response => response.json())
-.then(data => console.log(data));</code></pre>
+            <?php endif; ?>
+            
+            <?php if (empty($backend_url) || empty($backend_api_key)): ?>
+                <div class="notice notice-warning">
+                    <p><?php _e('Please configure your Backend API URL and API Key in Connection Settings to view scheduled content.', 'vernal-contentum'); ?></p>
                 </div>
-            </div>
+            <?php endif; ?>
+            
+            <?php if (!empty($scheduled_posts)): ?>
+                <div class="vernal-info-box" style="background: #fff; border-left: 4px solid #2271b1; padding: 20px; margin: 20px 0; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
+                    <h2><?php _e('Scheduled Content from Vernal', 'vernal-contentum'); ?></h2>
+                    <p><?php _e('Content scheduled in your Vernal dashboard that will be posted to WordPress:', 'vernal-contentum'); ?></p>
+                    
+                    <table class="widefat" style="margin-top: 15px;">
+                        <thead>
+                            <tr>
+                                <th style="width: 200px;"><?php _e('Title', 'vernal-contentum'); ?></th>
+                                <th style="width: 100px;"><?php _e('Platform', 'vernal-contentum'); ?></th>
+                                <th style="width: 150px;"><?php _e('Schedule Time', 'vernal-contentum'); ?></th>
+                                <th style="width: 100px;"><?php _e('Status', 'vernal-contentum'); ?></th>
+                                <th><?php _e('Preview', 'vernal-contentum'); ?></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($scheduled_posts as $post): ?>
+                                <tr>
+                                    <td><strong><?php echo esc_html($post['title'] ?: __('Untitled', 'vernal-contentum')); ?></strong></td>
+                                    <td><?php echo esc_html(ucfirst($post['platform'] ?: 'N/A')); ?></td>
+                                    <td>
+                                        <?php 
+                                        if (!empty($post['schedule_time'])) {
+                                            $schedule_date = new DateTime($post['schedule_time']);
+                                            echo esc_html($schedule_date->format('Y-m-d H:i'));
+                                        } else {
+                                            echo __('Not scheduled', 'vernal-contentum');
+                                        }
+                                        ?>
+                                    </td>
+                                    <td>
+                                        <span style="padding: 3px 8px; border-radius: 3px; background: <?php echo $post['status'] === 'scheduled' ? '#46b450' : ($post['status'] === 'published' ? '#2271b1' : '#f0f0f1'); ?>; color: <?php echo $post['status'] === 'scheduled' ? '#fff' : '#000'; ?>;">
+                                            <?php echo esc_html(ucfirst($post['status'] ?: 'draft')); ?>
+                                        </span>
+                                    </td>
+                                    <td>
+                                        <?php if (!empty($post['content'])): ?>
+                                            <details>
+                                                <summary style="cursor: pointer; color: #2271b1;"><?php _e('View Content', 'vernal-contentum'); ?></summary>
+                                                <div style="margin-top: 10px; padding: 10px; background: #f9f9f9; border-radius: 4px; max-height: 200px; overflow-y: auto;">
+                                                    <?php echo wp_kses_post(wpautop(substr($post['content'], 0, 500) . (strlen($post['content']) > 500 ? '...' : ''))); ?>
+                                                </div>
+                                            </details>
+                                        <?php else: ?>
+                                            <span style="color: #999;"><?php _e('No content', 'vernal-contentum'); ?></span>
+                                        <?php endif; ?>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            <?php elseif (empty($error_message) && !empty($backend_url) && !empty($backend_api_key)): ?>
+                <div class="notice notice-info">
+                    <p><?php _e('No scheduled content found. Schedule content in your Vernal dashboard to see it here.', 'vernal-contentum'); ?></p>
+                </div>
+            <?php endif; ?>
         </div>
         <?php
     }
@@ -483,7 +517,8 @@ class Vernal_Settings {
     
     public function render_enable_sitemap_field() {
         $integration = get_option('vernal_contentum_integration', array());
-        $value = isset($integration['enable_sitemap']) ? $integration['enable_sitemap'] : 0;
+        // Default to enabled (1) if not set
+        $value = isset($integration['enable_sitemap']) ? $integration['enable_sitemap'] : 1;
         $site_url = get_site_url();
         ?>
         <label>
@@ -507,7 +542,8 @@ class Vernal_Settings {
     
     public function render_enable_categories_field() {
         $integration = get_option('vernal_contentum_integration', array());
-        $value = isset($integration['enable_categories']) ? $integration['enable_categories'] : 0;
+        // Default to enabled (1) if not set
+        $value = isset($integration['enable_categories']) ? $integration['enable_categories'] : 1;
         ?>
         <label>
         <input 
