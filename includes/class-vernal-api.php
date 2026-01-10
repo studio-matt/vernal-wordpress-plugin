@@ -292,5 +292,46 @@ class Vernal_API {
         set_post_thumbnail($post_id, $id);
         return true;
     }
+    
+    /**
+     * Configure backend settings (for automatic setup from Vernal)
+     */
+    public function configure_backend($request) {
+        // Check API key first (required for this endpoint)
+        $api_check = $this->check_api_key($request);
+        if (is_wp_error($api_check)) {
+            return $api_check;
+        }
+        
+        // Also check user permissions
+        if (!current_user_can('manage_options')) {
+            return new WP_Error(
+                'insufficient_permissions',
+                __('You do not have permission to configure backend settings.', 'vernal-contentum'),
+                array('status' => 403)
+            );
+        }
+        
+        $params = $request->get_json_params();
+        
+        if (empty($params['backend_url']) || empty($params['backend_api_key'])) {
+            return new WP_Error(
+                'missing_parameters',
+                __('Backend URL and API key are required', 'vernal-contentum'),
+                array('status' => 400)
+            );
+        }
+        
+        // Save backend settings
+        $settings = get_option('vernal_contentum_settings', array());
+        $settings['backend_url'] = esc_url_raw($params['backend_url']);
+        $settings['backend_api_key'] = sanitize_text_field($params['backend_api_key']);
+        update_option('vernal_contentum_settings', $settings);
+        
+        return rest_ensure_response(array(
+            'status' => 'success',
+            'message' => __('Backend settings configured successfully', 'vernal-contentum')
+        ));
+    }
 }
 
