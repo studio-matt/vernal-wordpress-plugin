@@ -27,7 +27,7 @@ jobs:
           echo "Building version: $VERSION from production folder"
 
       - name: Setup SSH
-        uses: webfactory/ssh-agent@v0.9.0
+        uses: webfactory/ssh-agent@v0.10.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
       
@@ -63,7 +63,7 @@ jobs:
           ls -lh ${PLUGIN_SLUG}.zip
 
       - name: Checkout repo for tagging
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -75,7 +75,7 @@ jobs:
           git push origin "v${{ steps.set_version.outputs.version }}"
 
       - name: Create GitHub Release + upload asset
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/vernal-contentum.zip
           tag_name: v${{ steps.set_version.outputs.version }}
