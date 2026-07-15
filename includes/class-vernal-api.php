@@ -32,10 +32,17 @@ class Vernal_API {
             'permission_callback' => array($this, 'check_api_key'),
         ));
         
-        // Categories endpoint
+        // Categories endpoint (list)
         register_rest_route($namespace, '/categories', array(
             'methods' => 'GET',
             'callback' => array($this, 'get_categories'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+
+        // Categories endpoint (create)
+        register_rest_route($namespace, '/categories', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'create_category'),
             'permission_callback' => array($this, 'check_api_key'),
         ));
         
@@ -130,6 +137,61 @@ class Vernal_API {
             'success' => true,
             'data' => $formatted,
             'count' => count($formatted)
+        ));
+    }
+
+    /**
+     * Create a WordPress category (used by podcast topic → category flow)
+     */
+    public function create_category($request) {
+        $params = $request->get_json_params();
+        $name = isset($params['name']) ? sanitize_text_field($params['name']) : '';
+        if (empty($name)) {
+            return new WP_Error(
+                'missing_name',
+                __('Category name is required', 'vernal-contentum'),
+                array('status' => 400)
+            );
+        }
+
+        $existing = get_term_by('name', $name, 'category');
+        if ($existing && !is_wp_error($existing)) {
+            return rest_ensure_response(array(
+                'success' => true,
+                'data' => array(
+                    'id' => (int) $existing->term_id,
+                    'name' => $existing->name,
+                    'slug' => $existing->slug,
+                    'existing' => true,
+                ),
+            ));
+        }
+
+        $args = array();
+        if (!empty($params['description'])) {
+            $args['description'] = sanitize_textarea_field($params['description']);
+        }
+        if (!empty($params['parent'])) {
+            $args['parent'] = intval($params['parent']);
+        }
+        if (!empty($params['slug'])) {
+            $args['slug'] = sanitize_title($params['slug']);
+        }
+
+        $result = wp_insert_term($name, 'category', $args);
+        if (is_wp_error($result)) {
+            return $result;
+        }
+
+        $term = get_term((int) $result['term_id'], 'category');
+        return rest_ensure_response(array(
+            'success' => true,
+            'data' => array(
+                'id' => (int) $term->term_id,
+                'name' => $term->name,
+                'slug' => $term->slug,
+                'existing' => false,
+            ),
         ));
     }
     
@@ -241,10 +303,17 @@ class Vernal_API {
             ));
         }
         
-        // Set custom meta if provided
+        // Set custom meta if provided (supports arrays/objects as JSON)
         if (!empty($params['meta']) && is_array($params['meta'])) {
             foreach ($params['meta'] as $key => $value) {
-                update_post_meta($post_id, sanitize_key($key), sanitize_text_field($value));
+                $this->set_post_meta_value($post_id, $key, $value);
+            }
+        }
+
+        // ACF fields (preferred when Advanced Custom Fields is active)
+        if (!empty($params['acf']) && is_array($params['acf'])) {
+            foreach ($params['acf'] as $key => $value) {
+                $this->set_acf_or_meta($post_id, $key, $value);
             }
         }
         
@@ -263,6 +332,33 @@ class Vernal_API {
         ));
     }
     
+    /**
+     * Persist post meta; arrays/objects stored as JSON strings.
+     */
+    private function set_post_meta_value($post_id, $key, $value) {
+        $meta_key = sanitize_key($key);
+        if (is_array($value) || is_object($value)) {
+            update_post_meta($post_id, $meta_key, wp_json_encode($value));
+            return;
+        }
+        if (is_bool($value)) {
+            update_post_meta($post_id, $meta_key, $value ? '1' : '0');
+            return;
+        }
+        update_post_meta($post_id, $meta_key, is_string($value) ? sanitize_text_field($value) : $value);
+    }
+
+    /**
+     * Write ACF field when available; fall back to post meta.
+     */
+    private function set_acf_or_meta($post_id, $key, $value) {
+        if (function_exists('update_field')) {
+            update_field($key, $value, $post_id);
+            return;
+        }
+        $this->set_post_meta_value($post_id, $key, $value);
+    }
+
     /**
      * Set featured image from URL
      */
