@@ -289,9 +289,19 @@ class Vernal_API {
             wp_set_post_tags($post_id, $params['tags']);
         }
         
-        // Set featured image if provided
-        if (!empty($params['featured_image_url'])) {
-            $this->set_featured_image($post_id, $params['featured_image_url']);
+        // Set featured image if provided (also used as ACF thumbnail attachment)
+        $thumbnail_attachment_id = 0;
+        $image_url = '';
+        if (!empty($params['thumbnail_url'])) {
+            $image_url = esc_url_raw($params['thumbnail_url']);
+        } elseif (!empty($params['featured_image_url'])) {
+            $image_url = esc_url_raw($params['featured_image_url']);
+        }
+        if (!empty($image_url)) {
+            $thumbnail_attachment_id = $this->sideload_image_attachment($post_id, $image_url);
+            if ($thumbnail_attachment_id) {
+                set_post_thumbnail($post_id, $thumbnail_attachment_id);
+            }
         }
         
         // Set excerpt if provided
@@ -313,8 +323,21 @@ class Vernal_API {
         // ACF fields (preferred when Advanced Custom Fields is active)
         if (!empty($params['acf']) && is_array($params['acf'])) {
             foreach ($params['acf'] as $key => $value) {
+                // Image field: prefer attachment ID from sideload
+                if ($key === 'thumbnail' && $thumbnail_attachment_id) {
+                    $this->set_acf_or_meta($post_id, $key, $thumbnail_attachment_id);
+                    continue;
+                }
                 $this->set_acf_or_meta($post_id, $key, $value);
             }
+        } elseif ($thumbnail_attachment_id) {
+            $this->set_acf_or_meta($post_id, 'thumbnail', $thumbnail_attachment_id);
+        }
+
+        // PowerPress enclosure — Media URL must point at Blubrry CDN (or other public host).
+        // Do NOT run through sanitize_text_field (strips newlines / corrupts multiline enclosure).
+        if (!empty($params['powerpress']) && is_array($params['powerpress'])) {
+            $this->set_powerpress_enclosure($post_id, $params['powerpress']);
         }
         
         // Get the created post
@@ -328,6 +351,7 @@ class Vernal_API {
                 'status' => $post->post_status,
                 'url' => get_permalink($post_id),
                 'edit_url' => admin_url('post.php?action=edit&post=' . $post_id),
+                'thumbnail_id' => $thumbnail_attachment_id ? $thumbnail_attachment_id : null,
             )
         ));
     }
@@ -360,33 +384,111 @@ class Vernal_API {
     }
 
     /**
-     * Set featured image from URL
+     * Sideload a remote image and return the attachment ID (0 on failure).
      */
-    private function set_featured_image($post_id, $image_url) {
+    private function sideload_image_attachment($post_id, $image_url) {
         require_once(ABSPATH . 'wp-admin/includes/media.php');
         require_once(ABSPATH . 'wp-admin/includes/file.php');
         require_once(ABSPATH . 'wp-admin/includes/image.php');
-        
+
         $tmp = download_url($image_url);
-        
         if (is_wp_error($tmp)) {
-            return false;
+            return 0;
         }
-        
+
+        $name = basename(parse_url($image_url, PHP_URL_PATH));
+        if (empty($name) || strpos($name, '.') === false) {
+            $name = 'featured-' . $post_id . '.jpg';
+        }
+
         $file_array = array(
-            'name' => basename($image_url),
-            'tmp_name' => $tmp
+            'name' => $name,
+            'tmp_name' => $tmp,
         );
-        
+
         $id = media_handle_sideload($file_array, $post_id);
-        
         if (is_wp_error($id)) {
             @unlink($file_array['tmp_name']);
+            return 0;
+        }
+        return intval($id);
+    }
+
+    /**
+     * Set featured image from URL (legacy helper).
+     */
+    private function set_featured_image($post_id, $image_url) {
+        $id = $this->sideload_image_attachment($post_id, $image_url);
+        if (!$id) {
             return false;
         }
-        
         set_post_thumbnail($post_id, $id);
         return true;
+    }
+
+    /**
+     * Write PowerPress enclosure meta from a public media URL (Blubrry CDN).
+     *
+     * PowerPress expects post meta `enclosure` as:
+     *   url\nlength\ntype\n
+     * Optionally also writes `_podcast:mediaurl` for newer PowerPress UIs.
+     *
+     * @param int   $post_id
+     * @param array $powerpress  expects media_url; optional length, type
+     */
+    private function set_powerpress_enclosure($post_id, $powerpress) {
+        $media_url = isset($powerpress['media_url']) ? trim((string) $powerpress['media_url']) : '';
+        if ($media_url === '') {
+            return;
+        }
+        // Only allow http(s) public URLs — never Machine-internal paths as enclosure.
+        if (!preg_match('#^https?://#i', $media_url)) {
+            return;
+        }
+
+        $length = isset($powerpress['length']) ? intval($powerpress['length']) : 0;
+        $type = isset($powerpress['type']) ? trim((string) $powerpress['type']) : 'audio/mpeg';
+        if ($type === '') {
+            $type = 'audio/mpeg';
+        }
+
+        if ($length <= 0) {
+            $length = $this->probe_remote_content_length($media_url);
+        }
+
+        // Multiline enclosure — do not sanitize_text_field (strips newlines).
+        $enclosure = $media_url . "\n" . $length . "\n" . $type . "\n";
+        delete_post_meta($post_id, 'enclosure');
+        add_post_meta($post_id, 'enclosure', $enclosure, true);
+
+        // PowerPress extras used by the episode editor UI
+        update_post_meta($post_id, '_podcast:mediaurl', $media_url);
+        if (function_exists('powerpress_add_episode')) {
+            // Older PowerPress helper if present — ignore failures.
+            try {
+                powerpress_add_episode($post_id, array('url' => $media_url, 'size' => $length, 'type' => $type));
+            } catch (Exception $e) {
+                // no-op
+            }
+        }
+    }
+
+    /**
+     * HEAD-request Content-Length for enclosure size (0 if unknown).
+     */
+    private function probe_remote_content_length($url) {
+        $response = wp_remote_head($url, array(
+            'timeout' => 15,
+            'redirection' => 3,
+        ));
+        if (is_wp_error($response)) {
+            return 0;
+        }
+        $headers = wp_remote_retrieve_headers($response);
+        if (empty($headers['content-length'])) {
+            return 0;
+        }
+        return intval($headers['content-length']);
     }
     
     /**
