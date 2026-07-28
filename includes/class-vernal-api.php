@@ -66,6 +66,42 @@ class Vernal_API {
             'callback' => array($this, 'configure_backend'),
             'permission_callback' => array($this, 'check_api_key'),
         ));
+
+        register_rest_route($namespace, '/health', array(
+            'methods' => 'GET',
+            'callback' => array($this, 'get_health'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+
+        register_rest_route($namespace, '/media', array(
+            'methods' => 'GET',
+            'callback' => array($this, 'search_media'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+
+        register_rest_route($namespace, '/media/(?P<id>\d+)', array(
+            'methods' => 'GET',
+            'callback' => array($this, 'get_media'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+
+        register_rest_route($namespace, '/media', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'upload_media'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+
+        register_rest_route($namespace, '/posts/(?P<id>\d+)/code-fields', array(
+            'methods' => 'GET',
+            'callback' => array($this, 'get_code_fields'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+
+        register_rest_route($namespace, '/posts/(?P<id>\d+)/code-fields', array(
+            'methods' => 'PUT',
+            'callback' => array($this, 'put_code_fields'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
     }
     
     /**
@@ -530,6 +566,153 @@ class Vernal_API {
             'status' => 'success',
             'message' => __('Backend settings configured successfully', 'vernal-contentum')
         ));
+    }
+
+    public function get_health($request) {
+        $max_upload = wp_max_upload_size();
+        $acf_active = class_exists('Vernal_Code_Fields') ? Vernal_Code_Fields::is_acf_active() : false;
+        $group_registered = class_exists('Vernal_Code_Fields') ? Vernal_Code_Fields::is_group_registered() : false;
+        if ($acf_active && class_exists('Vernal_Code_Fields')) {
+            Vernal_Code_Fields::register_field_group();
+            $group_registered = Vernal_Code_Fields::is_group_registered() || $acf_active;
+        }
+        return rest_ensure_response(array(
+            'success' => true,
+            'data' => array(
+                'site_url' => site_url(),
+                'home_url' => home_url(),
+                'acf_active' => $acf_active,
+                'code_field_group_registered' => $group_registered,
+                'post_type_supports_meta' => post_type_exists('post'),
+                'upload' => array(
+                    'max_upload_bytes' => $max_upload,
+                    'allowed_mime_types' => array_values(get_allowed_mime_types()),
+                ),
+                'capabilities' => array(
+                    'media' => true,
+                    'code_fields' => true,
+                ),
+            ),
+        ));
+    }
+
+    public function search_media($request) {
+        $search = sanitize_text_field($request->get_param('search'));
+        $page = max(1, intval($request->get_param('page') ?: 1));
+        $per_page = min(50, max(1, intval($request->get_param('per_page') ?: 20)));
+        $args = array(
+            'post_type' => 'attachment',
+            'post_status' => 'inherit',
+            'posts_per_page' => $per_page,
+            'paged' => $page,
+            'orderby' => 'date',
+            'order' => 'DESC',
+        );
+        if ($search) {
+            $args['s'] = $search;
+        }
+        $mime = $request->get_param('mime');
+        if ($mime) {
+            $args['post_mime_type'] = sanitize_text_field($mime);
+        }
+        $q = new WP_Query($args);
+        $items = array();
+        foreach ($q->posts as $post) {
+            $items[] = $this->format_media_item($post);
+        }
+        return rest_ensure_response(array(
+            'success' => true,
+            'data' => $items,
+            'page' => $page,
+            'total' => intval($q->found_posts),
+        ));
+    }
+
+    public function get_media($request) {
+        $id = intval($request['id']);
+        $post = get_post($id);
+        if (!$post || $post->post_type !== 'attachment') {
+            return new WP_Error('not_found', __('Media not found', 'vernal-contentum'), array('status' => 404));
+        }
+        $item = $this->format_media_item($post);
+        $item['accessible'] = (bool) wp_get_attachment_url($id);
+        return rest_ensure_response(array('success' => true, 'data' => $item));
+    }
+
+    public function upload_media($request) {
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+        require_once ABSPATH . 'wp-admin/includes/media.php';
+        require_once ABSPATH . 'wp-admin/includes/image.php';
+
+        $files = $request->get_file_params();
+        if (empty($files['file'])) {
+            return new WP_Error('missing_file', __('File is required', 'vernal-contentum'), array('status' => 400));
+        }
+        $file = $files['file'];
+        $overrides = array('test_form' => false);
+        $move = wp_handle_upload($file, $overrides);
+        if (isset($move['error'])) {
+            return new WP_Error('upload_error', $move['error'], array('status' => 400));
+        }
+        $attachment = array(
+            'post_mime_type' => $move['type'],
+            'post_title' => sanitize_file_name(basename($move['file'])),
+            'post_content' => '',
+            'post_status' => 'inherit',
+        );
+        $attach_id = wp_insert_attachment($attachment, $move['file']);
+        if (is_wp_error($attach_id)) {
+            return $attach_id;
+        }
+        $meta = wp_generate_attachment_metadata($attach_id, $move['file']);
+        wp_update_attachment_metadata($attach_id, $meta);
+        $post = get_post($attach_id);
+        return rest_ensure_response(array(
+            'success' => true,
+            'data' => $this->format_media_item($post),
+        ));
+    }
+
+    private function format_media_item($post) {
+        $id = (int) $post->ID;
+        return array(
+            'id' => $id,
+            'media_id' => $id,
+            'title' => get_the_title($id),
+            'url' => wp_get_attachment_url($id),
+            'source_url' => wp_get_attachment_url($id),
+            'mime_type' => get_post_mime_type($id),
+            'mime' => get_post_mime_type($id),
+            'date' => $post->post_date,
+        );
+    }
+
+    public function get_code_fields($request) {
+        $id = intval($request['id']);
+        $post = get_post($id);
+        if (!$post) {
+            return new WP_Error('not_found', __('Post not found', 'vernal-contentum'), array('status' => 404));
+        }
+        $fields = Vernal_Code_Fields::get_code_fields($id);
+        return rest_ensure_response(array('success' => true, 'data' => $fields));
+    }
+
+    public function put_code_fields($request) {
+        $id = intval($request['id']);
+        $post = get_post($id);
+        if (!$post) {
+            return new WP_Error('not_found', __('Post not found', 'vernal-contentum'), array('status' => 404));
+        }
+        $params = $request->get_json_params();
+        if (!is_array($params)) {
+            return new WP_Error('invalid', __('JSON body required', 'vernal-contentum'), array('status' => 400));
+        }
+        // Authenticated Machine API key path — use machine setter with ID protection
+        $result = Vernal_Code_Fields::set_code_fields_from_machine($id, $params);
+        if (is_wp_error($result)) {
+            return $result;
+        }
+        return rest_ensure_response(array('success' => true, 'data' => $result));
     }
 }
 

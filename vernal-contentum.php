@@ -37,6 +37,7 @@ $updateChecker->getVcsApi()->enableReleaseAssets();
 
 // Include required files
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-settings.php';
+require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-code-fields.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-api.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-backend-api.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-sitemap.php';
