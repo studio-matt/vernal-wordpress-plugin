@@ -102,6 +102,21 @@ class Vernal_API {
             'callback' => array($this, 'put_code_fields'),
             'permission_callback' => array($this, 'check_api_key'),
         ));
+
+        // Sync approved shirt print PNGs → media library + ACF galleries (front + back placeholder)
+        register_rest_route($namespace, '/posts/(?P<id>\d+)/shirt-prints', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'sync_shirt_prints'),
+            'permission_callback' => array($this, 'check_api_key'),
+            'args' => array(
+                'id' => array(
+                    'required' => true,
+                    'validate_callback' => function ($param) {
+                        return is_numeric($param);
+                    },
+                ),
+            ),
+        ));
     }
     
     /**
@@ -375,6 +390,12 @@ class Vernal_API {
         if (!empty($params['powerpress']) && is_array($params['powerpress'])) {
             $this->set_powerpress_enclosure($post_id, $params['powerpress']);
         }
+
+        // Approved shirt print assets → Media Library + ACF galleries
+        $shirt_sync = array('front_ids' => array(), 'back_ids' => array());
+        if (isset($params['shirt_print_assets']) && is_array($params['shirt_print_assets'])) {
+            $shirt_sync = $this->apply_shirt_print_assets($post_id, $params['shirt_print_assets']);
+        }
         
         // Get the created post
         $post = get_post($post_id);
@@ -388,8 +409,165 @@ class Vernal_API {
                 'url' => get_permalink($post_id),
                 'edit_url' => admin_url('post.php?action=edit&post=' . $post_id),
                 'thumbnail_id' => $thumbnail_attachment_id ? $thumbnail_attachment_id : null,
+                'shirt_print_attachment_ids' => $shirt_sync['front_ids'],
+                'shirt_print_back_attachment_ids' => $shirt_sync['back_ids'],
             )
         ));
+    }
+
+    /**
+     * Re-sync approved shirt prints onto an existing episode post (approve/unapprove from Machine).
+     */
+    public function sync_shirt_prints($request) {
+        $post_id = intval($request['id']);
+        $post = get_post($post_id);
+        if (!$post) {
+            return new WP_Error(
+                'not_found',
+                __('Post not found', 'vernal-contentum'),
+                array('status' => 404)
+            );
+        }
+        $params = $request->get_json_params();
+        if (!is_array($params)) {
+            $params = array();
+        }
+        $assets = isset($params['shirt_print_assets']) && is_array($params['shirt_print_assets'])
+            ? $params['shirt_print_assets']
+            : array();
+        $result = $this->apply_shirt_print_assets($post_id, $assets);
+        return rest_ensure_response(array(
+            'success' => true,
+            'data' => array(
+                'id' => $post_id,
+                'shirt_print_attachment_ids' => $result['front_ids'],
+                'shirt_print_back_attachment_ids' => $result['back_ids'],
+                'count_front' => count($result['front_ids']),
+                'count_back' => count($result['back_ids']),
+            ),
+        ));
+    }
+
+    /**
+     * Sideload shirt print PNGs into the Media Library and write ACF galleries + JSON.
+     *
+     * ACF fields (create on the episode post group):
+     * - shirt_prints (Gallery) — front print attachment IDs
+     * - shirt_prints_back (Gallery) — back print attachment IDs (placeholder until back builds ship)
+     * - shirt_prints_json (Textarea) — metadata for Printful / theme
+     * - shirt_prints_back_json (Textarea) — back metadata placeholder
+     *
+     * @param int   $post_id
+     * @param array $assets  list of { url, side, design_id, build_id, quote, speaker_name, build_version }
+     * @return array{front_ids:int[],back_ids:int[]}
+     */
+    private function apply_shirt_print_assets($post_id, $assets) {
+        $front_ids = array();
+        $back_ids = array();
+        $front_meta = array();
+        $back_meta = array();
+        $seen_keys = array();
+
+        if (!is_array($assets)) {
+            $assets = array();
+        }
+
+        foreach ($assets as $asset) {
+            if (!is_array($asset)) {
+                continue;
+            }
+            $url = isset($asset['url']) ? trim((string) $asset['url']) : '';
+            if ($url === '' || !preg_match('#^https?://#i', $url)) {
+                continue;
+            }
+            $side = isset($asset['side']) ? strtolower(trim((string) $asset['side'])) : 'front';
+            if ($side !== 'back') {
+                $side = 'front';
+            }
+            $design_id = isset($asset['design_id']) ? sanitize_text_field((string) $asset['design_id']) : '';
+            $build_id = isset($asset['build_id']) ? sanitize_text_field((string) $asset['build_id']) : '';
+            $key = $side . ':' . $design_id . ':' . $build_id;
+            if ($key === 'front::' || $key === 'back::') {
+                $key = $side . ':' . md5($url);
+            }
+            if (isset($seen_keys[$key])) {
+                continue;
+            }
+            $seen_keys[$key] = true;
+
+            $attachment_id = $this->find_shirt_attachment_by_key($post_id, $key);
+            if (!$attachment_id) {
+                $attachment_id = $this->sideload_image_attachment($post_id, $url);
+                if ($attachment_id) {
+                    update_post_meta($attachment_id, '_vernal_shirt_key', $key);
+                    update_post_meta($attachment_id, '_vernal_shirt_side', $side);
+                    if ($design_id !== '') {
+                        update_post_meta($attachment_id, '_vernal_shirt_design_id', $design_id);
+                    }
+                    if ($build_id !== '') {
+                        update_post_meta($attachment_id, '_vernal_shirt_build_id', $build_id);
+                    }
+                }
+            }
+            if (!$attachment_id) {
+                continue;
+            }
+
+            $entry = array(
+                'attachment_id' => intval($attachment_id),
+                'url' => wp_get_attachment_url($attachment_id) ?: $url,
+                'source_url' => $url,
+                'side' => $side,
+                'design_id' => $design_id,
+                'build_id' => $build_id,
+                'build_version' => isset($asset['build_version']) ? intval($asset['build_version']) : 0,
+                'quote' => isset($asset['quote']) ? sanitize_text_field((string) $asset['quote']) : '',
+                'speaker_name' => isset($asset['speaker_name']) ? sanitize_text_field((string) $asset['speaker_name']) : '',
+            );
+
+            if ($side === 'back') {
+                $back_ids[] = intval($attachment_id);
+                $back_meta[] = $entry;
+            } else {
+                $front_ids[] = intval($attachment_id);
+                $front_meta[] = $entry;
+            }
+        }
+
+        // Gallery fields: replace wholesale so unapprove removes from ACF (media files kept).
+        $this->set_acf_or_meta($post_id, 'shirt_prints', $front_ids);
+        $this->set_acf_or_meta($post_id, 'shirt_prints_back', $back_ids);
+        $this->set_acf_or_meta($post_id, 'shirt_prints_json', wp_json_encode($front_meta));
+        $this->set_acf_or_meta($post_id, 'shirt_prints_back_json', wp_json_encode($back_meta));
+
+        return array(
+            'front_ids' => $front_ids,
+            'back_ids' => $back_ids,
+        );
+    }
+
+    /**
+     * Find an existing sideloaded shirt attachment for this post by stable key.
+     */
+    private function find_shirt_attachment_by_key($post_id, $key) {
+        $q = new WP_Query(array(
+            'post_type' => 'attachment',
+            'post_status' => 'inherit',
+            'posts_per_page' => 1,
+            'post_parent' => intval($post_id),
+            'fields' => 'ids',
+            'meta_query' => array(
+                array(
+                    'key' => '_vernal_shirt_key',
+                    'value' => $key,
+                    'compare' => '=',
+                ),
+            ),
+        ));
+        if (!empty($q->posts)) {
+            return intval($q->posts[0]);
+        }
+        return 0;
     }
     
     /**
