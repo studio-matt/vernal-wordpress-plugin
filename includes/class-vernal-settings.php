@@ -85,7 +85,7 @@ class Vernal_Settings {
         
         add_settings_section(
             'vernal_connection_section',
-            __('Connection Settings', 'vernal-contentum'),
+            '',
             array($this, 'render_connection_section'),
             'vernal-contentum'
         );
@@ -114,30 +114,7 @@ class Vernal_Settings {
             'vernal_integration_section'
         );
         
-        add_settings_field(
-            'vernal_api_key',
-            __('Inbound API Key', 'vernal-contentum'),
-            array($this, 'render_api_key_field'),
-            'vernal-contentum',
-            'vernal_connection_section'
-        );
-        
-        // Backend connection settings (Advanced — auto-filled by Vernal)
-        add_settings_field(
-            'vernal_backend_url',
-            __('Backend API URL (Advanced)', 'vernal-contentum'),
-            array($this, 'render_backend_url_field'),
-            'vernal-contentum',
-            'vernal_connection_section'
-        );
-        
-        add_settings_field(
-            'vernal_backend_api_key',
-            __('Backend API Key (Advanced)', 'vernal-contentum'),
-            array($this, 'render_backend_api_key_field'),
-            'vernal-contentum',
-            'vernal_connection_section'
-        );
+        // Connection credentials are managed by Vernal automatically — no admin form fields.
         
         // Sitemap/Schema Settings Section (for schema settings page)
         add_settings_section(
@@ -287,8 +264,8 @@ class Vernal_Settings {
         $api_key = get_option('vernal_contentum_api_key', '');
         $site_url = get_site_url();
         $backend_configured = class_exists('Vernal_Backend_API') && Vernal_Backend_API::is_configured();
-        $last_tested = isset($settings['outbound_last_tested_at']) ? $settings['outbound_last_tested_at'] : '';
         $outbound_status = isset($settings['outbound_status']) ? $settings['outbound_status'] : ($backend_configured ? 'unknown' : 'not_configured');
+        $linked = ($outbound_status === 'connected') || ($backend_configured && in_array($outbound_status, array('configured', 'unknown'), true));
         
         ?>
         <div class="wrap">
@@ -296,7 +273,7 @@ class Vernal_Settings {
             
             <div class="vernal-connection-box" style="background: #fff; border: 1px solid #ccd0d4; padding: 20px; margin: 20px 0; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
                 <h2><?php _e('Connect this site to Vernal', 'vernal-contentum'); ?></h2>
-                <p><?php _e('In Vernal → Account Settings → WordPress → Add site, paste the Site URL and API Key below. Vernal will verify the plugin and configure publishing automatically.', 'vernal-contentum'); ?></p>
+                <p><?php _e('In Vernal → Account Settings → WordPress → Add site, paste the Site URL and API Key below. Vernal finishes the rest automatically.', 'vernal-contentum'); ?></p>
                 
                 <div style="margin: 15px 0;">
                     <label for="vernal-site-url" style="display: block; margin-bottom: 5px; font-weight: 600;">
@@ -318,7 +295,7 @@ class Vernal_Settings {
                 
                 <div style="margin: 15px 0;">
                     <label for="vernal-inbound-api-key" style="display: block; margin-bottom: 5px; font-weight: 600;">
-                        <?php _e('API Key (for Vernal)', 'vernal-contentum'); ?>
+                        <?php _e('API Key', 'vernal-contentum'); ?>
                     </label>
                     <input
                         type="text"
@@ -333,49 +310,31 @@ class Vernal_Settings {
                         <?php _e('Copy', 'vernal-contentum'); ?>
                     </button>
                     <p class="description">
-                        <?php _e('This inbound key authenticates Vernal → WordPress. Rotating it invalidates remote configuration until you reconnect from Vernal.', 'vernal-contentum'); ?>
+                        <?php _e('Treat this like a password. Anyone with it can publish to this site through Vernal.', 'vernal-contentum'); ?>
                     </p>
                 </div>
                 
                 <div id="vernal-connection-status-panel" style="margin-top: 20px; padding: 12px 14px; background: #f6f7f7; border-left: 4px solid #2271b1;">
-                    <strong><?php _e('Connection status', 'vernal-contentum'); ?></strong>
-                    <ul style="margin: 8px 0 0 18px; list-style: disc;">
-                        <li>
-                            <?php _e('Inbound (Vernal → WordPress):', 'vernal-contentum'); ?>
-                            <?php if (!empty($api_key)): ?>
-                                <span style="color: #46b450;"><?php _e('Ready', 'vernal-contentum'); ?></span>
-                            <?php else: ?>
-                                <span style="color: #dc3232;"><?php _e('Missing API key — reinstall or regenerate', 'vernal-contentum'); ?></span>
-                            <?php endif; ?>
-                        </li>
-                        <li>
-                            <?php _e('Outbound (WordPress → Vernal):', 'vernal-contentum'); ?>
-                            <?php if ($outbound_status === 'connected' || ($backend_configured && $outbound_status === 'unknown')): ?>
-                                <span style="color: #46b450;" id="vernal-outbound-status-label">
-                                    <?php echo $outbound_status === 'connected'
-                                        ? esc_html__('Connected', 'vernal-contentum')
-                                        : esc_html__('Configured (test to verify)', 'vernal-contentum'); ?>
-                                </span>
-                            <?php elseif ($backend_configured): ?>
-                                <span style="color: #dba617;" id="vernal-outbound-status-label"><?php echo esc_html(ucfirst($outbound_status)); ?></span>
-                            <?php else: ?>
-                                <span style="color: #646970;" id="vernal-outbound-status-label"><?php _e('Not configured — connect from Vernal to fill automatically', 'vernal-contentum'); ?></span>
-                            <?php endif; ?>
-                            <?php if ($last_tested): ?>
-                                <br><small><?php printf(esc_html__('Last tested: %s', 'vernal-contentum'), esc_html($last_tested)); ?></small>
-                            <?php endif; ?>
-                        </li>
-                    </ul>
+                    <strong><?php _e('Status', 'vernal-contentum'); ?></strong>
+                    <p style="margin: 8px 0 0;">
+                        <?php if (!empty($api_key) && $linked): ?>
+                            <span style="color: #46b450;" id="vernal-outbound-status-label"><?php _e('Connected to Vernal', 'vernal-contentum'); ?></span>
+                        <?php elseif (!empty($api_key)): ?>
+                            <span style="color: #646970;" id="vernal-outbound-status-label"><?php _e('Waiting for connection from Vernal', 'vernal-contentum'); ?></span>
+                        <?php else: ?>
+                            <span style="color: #dc3232;" id="vernal-outbound-status-label"><?php _e('Not ready — reinstall the plugin', 'vernal-contentum'); ?></span>
+                        <?php endif; ?>
+                    </p>
+                    <?php if ($backend_configured): ?>
+                        <p style="margin: 10px 0 0;">
+                            <button type="button" class="button" id="test-backend-connection">
+                                <?php _e('Check connection', 'vernal-contentum'); ?>
+                            </button>
+                            <span id="backend-connection-status" style="margin-left: 10px;"></span>
+                        </p>
+                    <?php endif; ?>
                 </div>
             </div>
-            
-            <form action="options.php" method="post">
-                <?php
-                settings_fields('vernal_contentum_settings');
-                do_settings_sections('vernal-contentum');
-                submit_button(__('Save Settings', 'vernal-contentum'));
-                ?>
-            </form>
         </div>
         <?php
     }
@@ -617,103 +576,7 @@ class Vernal_Settings {
     }
     
     public function render_connection_section() {
-        echo '<p>' . esc_html__('Advanced settings are filled automatically when you connect from Vernal. Only edit these for emergency manual override.', 'vernal-contentum') . '</p>';
-        echo '<p class="description">' . esc_html__('Rotating the inbound API key (above) invalidates remote configuration until you reconnect from Vernal.', 'vernal-contentum') . '</p>';
-    }
-    
-    public function render_api_key_field() {
-        $api_key = get_option('vernal_contentum_api_key', '');
-        ?>
-        <input 
-            type="text" 
-            value="<?php echo esc_attr($api_key); ?>" 
-            class="regular-text" 
-            readonly
-            onclick="this.select();"
-        />
-        <button type="button" class="button" onclick="this.previousElementSibling.select(); document.execCommand('copy');">
-            <?php _e('Copy', 'vernal-contentum'); ?>
-        </button>
-        <p class="description"><?php _e('Inbound key shown above for connecting from Vernal. Same value as the setup box.', 'vernal-contentum'); ?></p>
-        <?php
-    }
-    
-    public function render_backend_url_field() {
-        $settings = get_option('vernal_contentum_settings', array());
-        // Check wp-config.php first (recommended), fallback to wp_options
-        $value = defined('VERNAL_BACKEND_URL') 
-            ? VERNAL_BACKEND_URL 
-            : (isset($settings['backend_url']) ? $settings['backend_url'] : '');
-        $is_from_config = defined('VERNAL_BACKEND_URL');
-        ?>
-        <input 
-            type="url" 
-            name="vernal_contentum_settings[backend_url]" 
-            value="<?php echo esc_attr($value); ?>" 
-            class="regular-text"
-            placeholder="https://themachine.vernalcontentum.com"
-            <?php echo $is_from_config ? 'readonly' : ''; ?>
-        />
-        <?php if ($is_from_config): ?>
-            <span class="description" style="color: #46b450;">
-                <?php _e('✓ Set via wp-config.php constant', 'vernal-contentum'); ?>
-            </span>
-        <?php endif; ?>
-        <p class="description">
-            <?php _e('Auto-filled by Vernal on Save. Manual override only if needed.', 'vernal-contentum'); ?>
-            <?php if (!$is_from_config): ?>
-                <br><strong><?php _e('Optional:', 'vernal-contentum'); ?></strong> 
-                <?php _e('Set VERNAL_BACKEND_URL in wp-config.php to lock this value.', 'vernal-contentum'); ?>
-            <?php endif; ?>
-        </p>
-        <?php
-    }
-    
-    public function render_backend_api_key_field() {
-        $settings = get_option('vernal_contentum_settings', array());
-        // Check wp-config.php first (recommended), fallback to wp_options
-        $value = defined('VERNAL_BACKEND_API_KEY') 
-            ? VERNAL_BACKEND_API_KEY 
-            : (isset($settings['backend_api_key']) ? $settings['backend_api_key'] : '');
-        $is_from_config = defined('VERNAL_BACKEND_API_KEY');
-        $has_value = !empty($value);
-        $masked = '';
-        if ($has_value && strlen($value) > 8) {
-            $masked = substr($value, 0, 4) . '…' . substr($value, -4);
-        } elseif ($has_value) {
-            $masked = '••••';
-        }
-        ?>
-        <input 
-            type="password" 
-            name="vernal_contentum_settings[backend_api_key]" 
-            value="" 
-            class="regular-text"
-            placeholder="<?php _e('Leave blank to keep current (auto-filled by Vernal)', 'vernal-contentum'); ?>"
-            autocomplete="new-password"
-            <?php echo $is_from_config ? 'readonly' : ''; ?>
-        />
-        <?php if ($is_from_config): ?>
-            <span class="description" style="color: #46b450;">
-                <?php _e('✓ Set via wp-config.php constant', 'vernal-contentum'); ?>
-            </span>
-        <?php elseif ($has_value): ?>
-            <span class="description" style="color: #2271b1;">
-                <?php printf(esc_html__('Configured: %s', 'vernal-contentum'), esc_html($masked)); ?>
-            </span>
-        <?php endif; ?>
-        <button type="button" class="button" id="test-backend-connection" style="margin-left: 10px;">
-            <?php _e('Test Connection', 'vernal-contentum'); ?>
-        </button>
-        <span id="backend-connection-status" style="margin-left: 10px;"></span>
-        <p class="description">
-            <?php _e('Outbound key for WordPress → Vernal. Filled automatically when you Save the site in Vernal.', 'vernal-contentum'); ?>
-            <?php if (!$is_from_config): ?>
-                <br><strong><?php _e('Optional:', 'vernal-contentum'); ?></strong> 
-                <?php _e('Set VERNAL_BACKEND_API_KEY in wp-config.php to lock this value.', 'vernal-contentum'); ?>
-            <?php endif; ?>
-        </p>
-        <?php
+        // Intentionally empty — connection UI is rendered in render_settings_page().
     }
     
     public function render_sitemap_section() {
@@ -935,17 +798,8 @@ class Vernal_Settings {
         $settings['outbound_status'] = 'connected';
         update_option('vernal_contentum_settings', $settings);
         
-        $safe = array();
-        if (is_array($result) && isset($result['user']) && is_array($result['user'])) {
-            $safe['user'] = array(
-                'username' => isset($result['user']['username']) ? $result['user']['username'] : '',
-                'email' => isset($result['user']['email']) ? $result['user']['email'] : '',
-            );
-        }
-        
         wp_send_json_success(array(
-            'message' => __('Connection successful!', 'vernal-contentum'),
-            'data' => $safe,
+            'message' => __('Connected', 'vernal-contentum'),
             'last_tested_at' => $settings['outbound_last_tested_at'],
         ));
     }

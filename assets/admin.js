@@ -32,8 +32,8 @@
             var $status = $('#backend-connection-status');
             var originalText = $button.text();
             
-            $button.prop('disabled', true).text('Testing...');
-            $status.html('<span style="color: #2271b1;">Testing connection…</span>');
+            $button.prop('disabled', true).text('Checking…');
+            $status.html('<span style="color: #2271b1;">Checking…</span>');
             
             $.ajax({
                 url: vernalContentum.ajax_url,
@@ -44,19 +44,15 @@
                 },
                 success: function(response) {
                     if (response.success) {
-                        $status.html('<span style="color: #46b450;">✓ ' + response.data.message + '</span>');
-                        if (response.data.data && response.data.data.user) {
-                            $status.append('<br><small>User: ' + response.data.data.user.username + ' (' + response.data.data.user.email + ')</small>');
-                        }
-                        $('#vernal-outbound-status-label').text('Connected').css('color', '#46b450');
+                        $status.html('<span style="color: #46b450;">✓ Connected</span>');
+                        $('#vernal-outbound-status-label').text('Connected to Vernal').css('color', '#46b450');
                     } else {
-                        var msg = (response.data && response.data.message) ? response.data.message : 'Connection failed';
-                        $status.html('<span style="color: #dc3232;">✗ ' + msg + '</span>');
-                        $('#vernal-outbound-status-label').text('Error').css('color', '#dc3232');
+                        $status.html('<span style="color: #dc3232;">✗ Not connected</span>');
+                        $('#vernal-outbound-status-label').text('Waiting for connection from Vernal').css('color', '#646970');
                     }
                 },
                 error: function() {
-                    $status.html('<span style="color: #dc3232;">✗ Connection error</span>');
+                    $status.html('<span style="color: #dc3232;">✗ Not connected</span>');
                 },
                 complete: function() {
                     $button.prop('disabled', false).text(originalText);

@@ -722,6 +722,43 @@ class Vernal_API {
     }
     
     /**
+     * Allowed Vernal API hosts for configure-backend (HTTPS only).
+     * Keeps compromised WP installs from being pointed at arbitrary servers.
+     */
+    private function allowed_backend_hosts() {
+        $hosts = array(
+            'themachine.vernalcontentum.com',
+            'machine.vernalcontentum.com',
+        );
+        /**
+         * Filter allowed Vernal backend hosts for configure-backend.
+         *
+         * @param array $hosts Lowercase hostnames only.
+         */
+        $hosts = apply_filters('vernal_contentum_allowed_backend_hosts', $hosts);
+        return array_values(array_filter(array_map('strtolower', (array) $hosts)));
+    }
+
+    private function is_allowed_backend_url($url) {
+        $parsed = wp_parse_url($url);
+        if (empty($parsed['scheme']) || strtolower($parsed['scheme']) !== 'https') {
+            return false;
+        }
+        if (empty($parsed['host'])) {
+            return false;
+        }
+        // Reject userinfo, unexpected ports (allow default 443 only).
+        if (!empty($parsed['user']) || !empty($parsed['pass'])) {
+            return false;
+        }
+        if (!empty($parsed['port']) && intval($parsed['port']) !== 443) {
+            return false;
+        }
+        $host = strtolower($parsed['host']);
+        return in_array($host, $this->allowed_backend_hosts(), true);
+    }
+
+    /**
      * Configure backend settings (automatic setup from Vernal).
      * Auth boundary is inbound vc_ via check_api_key only (no WP logged-in user).
      */
@@ -751,7 +788,7 @@ class Vernal_API {
         if (empty($params['backend_url']) || empty($params['backend_api_key'])) {
             return new WP_Error(
                 'missing_parameters',
-                __('Backend URL and API key are required', 'vernal-contentum'),
+                __('Configuration parameters are required', 'vernal-contentum'),
                 array('status' => 400)
             );
         }
@@ -759,16 +796,16 @@ class Vernal_API {
         $backend_url = esc_url_raw(trim((string) $params['backend_url']));
         $backend_api_key = sanitize_text_field((string) $params['backend_api_key']);
 
-        if (empty($backend_url) || !preg_match('#^https?://#i', $backend_url)) {
+        if (empty($backend_url) || !$this->is_allowed_backend_url($backend_url)) {
             return new WP_Error(
                 'invalid_backend_url',
-                __('Backend URL must be a valid http(s) URL', 'vernal-contentum'),
+                __('Backend URL is not allowed', 'vernal-contentum'),
                 array('status' => 400)
             );
         }
 
         // Only accept outbound-style keys from Vernal.
-        if (strpos($backend_api_key, 'vcb_') !== 0) {
+        if (strpos($backend_api_key, 'vcb_') !== 0 || strlen($backend_api_key) < 20) {
             return new WP_Error(
                 'invalid_backend_api_key',
                 __('Backend API key format is invalid', 'vernal-contentum'),
@@ -786,14 +823,11 @@ class Vernal_API {
         $settings['outbound_status'] = 'configured';
         $settings['outbound_configured_at'] = gmdate('c');
         update_option('vernal_contentum_settings', $settings);
-
-        $masked = substr($backend_api_key, 0, 4) . '…' . substr($backend_api_key, -4);
         
+        // Do not echo URL or key material back to the client.
         return rest_ensure_response(array(
             'status' => 'success',
-            'message' => __('Backend settings configured successfully', 'vernal-contentum'),
-            'backend_url' => $settings['backend_url'],
-            'backend_api_key_masked' => $masked,
+            'message' => __('Connected successfully', 'vernal-contentum'),
             'outbound_configured' => true,
         ));
     }
