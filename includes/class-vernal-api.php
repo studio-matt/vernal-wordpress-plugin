@@ -823,12 +823,34 @@ class Vernal_API {
         $settings['outbound_status'] = 'configured';
         $settings['outbound_configured_at'] = gmdate('c');
         update_option('vernal_contentum_settings', $settings);
+
+        // Immediately verify WP → Vernal (same check as the admin "Check connection" button)
+        // so the Connection page shows Connected/verified without a manual click.
+        $outbound_verified = false;
+        if (class_exists('Vernal_Backend_API')) {
+            $test = Vernal_Backend_API::test_connection();
+            $settings = get_option('vernal_contentum_settings', array());
+            if (!is_array($settings)) {
+                $settings = array();
+            }
+            $settings['outbound_last_tested_at'] = gmdate('c');
+            if (!is_wp_error($test)) {
+                $settings['outbound_status'] = 'connected';
+                $outbound_verified = true;
+            } else {
+                $settings['outbound_status'] = 'error';
+            }
+            update_option('vernal_contentum_settings', $settings);
+        }
         
         // Do not echo URL or key material back to the client.
         return rest_ensure_response(array(
             'status' => 'success',
-            'message' => __('Connected successfully', 'vernal-contentum'),
+            'message' => $outbound_verified
+                ? __('Connected and verified', 'vernal-contentum')
+                : __('Connected successfully', 'vernal-contentum'),
             'outbound_configured' => true,
+            'outbound_verified' => $outbound_verified,
         ));
     }
 

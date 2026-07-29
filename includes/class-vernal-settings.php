@@ -314,10 +314,12 @@ class Vernal_Settings {
                     </p>
                 </div>
                 
-                <div id="vernal-connection-status-panel" style="margin-top: 20px; padding: 12px 14px; background: #f6f7f7; border-left: 4px solid #2271b1;">
+                <div id="vernal-connection-status-panel" style="margin-top: 20px; padding: 12px 14px; background: #f6f7f7; border-left: 4px solid <?php echo ($outbound_status === 'connected') ? '#46b450' : '#2271b1'; ?>;">
                     <strong><?php _e('Status', 'vernal-contentum'); ?></strong>
                     <p style="margin: 8px 0 0;">
-                        <?php if (!empty($api_key) && $linked): ?>
+                        <?php if (!empty($api_key) && $outbound_status === 'connected'): ?>
+                            <span style="color: #46b450; font-weight: 600;" id="vernal-outbound-status-label"><?php _e('✓ Connected to Vernal', 'vernal-contentum'); ?></span>
+                        <?php elseif (!empty($api_key) && $linked): ?>
                             <span style="color: #46b450;" id="vernal-outbound-status-label"><?php _e('Connected to Vernal', 'vernal-contentum'); ?></span>
                         <?php elseif (!empty($api_key)): ?>
                             <span style="color: #646970;" id="vernal-outbound-status-label"><?php _e('Waiting for connection from Vernal', 'vernal-contentum'); ?></span>

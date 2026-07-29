@@ -45,10 +45,11 @@
                 success: function(response) {
                     if (response.success) {
                         $status.html('<span style="color: #46b450;">✓ Connected</span>');
-                        $('#vernal-outbound-status-label').text('Connected to Vernal').css('color', '#46b450');
+                        $('#vernal-outbound-status-label').text('✓ Connected to Vernal').css({'color': '#46b450', 'font-weight': '600'});
+                        $('#vernal-connection-status-panel').css('border-left-color', '#46b450');
                     } else {
                         $status.html('<span style="color: #dc3232;">✗ Not connected</span>');
-                        $('#vernal-outbound-status-label').text('Waiting for connection from Vernal').css('color', '#646970');
+                        $('#vernal-outbound-status-label').text('Waiting for connection from Vernal').css({'color': '#646970', 'font-weight': 'normal'});
                     }
                 },
                 error: function() {
