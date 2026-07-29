@@ -120,7 +120,8 @@ class Vernal_API {
     }
     
     /**
-     * Verify API key from request header
+     * Verify inbound API key (vc_…) from request header.
+     * Outbound vcb_ keys must never authorize plugin REST routes.
      */
     public function check_api_key($request) {
         $api_key = get_option('vernal_contentum_api_key', '');
@@ -133,15 +134,30 @@ class Vernal_API {
             );
         }
         
-        // Check for API key in header
         $request_api_key = $request->get_header('X-API-Key');
         
         if (empty($request_api_key)) {
-            // Also check query parameter for convenience
             $request_api_key = $request->get_param('api_key');
         }
         
-        if ($request_api_key !== $api_key) {
+        if (empty($request_api_key)) {
+            return new WP_Error(
+                'invalid_api_key',
+                __('Invalid API key', 'vernal-contentum'),
+                array('status' => 401)
+            );
+        }
+
+        // Reject outbound backend keys if presented as inbound auth.
+        if (is_string($request_api_key) && strpos($request_api_key, 'vcb_') === 0) {
+            return new WP_Error(
+                'invalid_api_key',
+                __('Invalid API key', 'vernal-contentum'),
+                array('status' => 401)
+            );
+        }
+        
+        if (!hash_equals((string) $api_key, (string) $request_api_key)) {
             return new WP_Error(
                 'invalid_api_key',
                 __('Invalid API key', 'vernal-contentum'),
@@ -706,25 +722,31 @@ class Vernal_API {
     }
     
     /**
-     * Configure backend settings (for automatic setup from Vernal)
+     * Configure backend settings (automatic setup from Vernal).
+     * Auth boundary is inbound vc_ via check_api_key only (no WP logged-in user).
      */
     public function configure_backend($request) {
-        // Check API key first (required for this endpoint)
         $api_check = $this->check_api_key($request);
         if (is_wp_error($api_check)) {
             return $api_check;
         }
-        
-        // Also check user permissions
-        if (!current_user_can('manage_options')) {
+
+        // Rate limit: max 10 configure attempts per hour per site.
+        $throttle_key = 'vernal_configure_backend_' . md5(home_url());
+        $hits = (int) get_transient($throttle_key);
+        if ($hits >= 10) {
             return new WP_Error(
-                'insufficient_permissions',
-                __('You do not have permission to configure backend settings.', 'vernal-contentum'),
-                array('status' => 403)
+                'rate_limited',
+                __('Too many configuration attempts. Try again later.', 'vernal-contentum'),
+                array('status' => 429)
             );
         }
+        set_transient($throttle_key, $hits + 1, HOUR_IN_SECONDS);
         
         $params = $request->get_json_params();
+        if (!is_array($params)) {
+            $params = array();
+        }
         
         if (empty($params['backend_url']) || empty($params['backend_api_key'])) {
             return new WP_Error(
@@ -733,16 +755,46 @@ class Vernal_API {
                 array('status' => 400)
             );
         }
+
+        $backend_url = esc_url_raw(trim((string) $params['backend_url']));
+        $backend_api_key = sanitize_text_field((string) $params['backend_api_key']);
+
+        if (empty($backend_url) || !preg_match('#^https?://#i', $backend_url)) {
+            return new WP_Error(
+                'invalid_backend_url',
+                __('Backend URL must be a valid http(s) URL', 'vernal-contentum'),
+                array('status' => 400)
+            );
+        }
+
+        // Only accept outbound-style keys from Vernal.
+        if (strpos($backend_api_key, 'vcb_') !== 0) {
+            return new WP_Error(
+                'invalid_backend_api_key',
+                __('Backend API key format is invalid', 'vernal-contentum'),
+                array('status' => 400)
+            );
+        }
         
-        // Save backend settings
         $settings = get_option('vernal_contentum_settings', array());
-        $settings['backend_url'] = esc_url_raw($params['backend_url']);
-        $settings['backend_api_key'] = sanitize_text_field($params['backend_api_key']);
+        if (!is_array($settings)) {
+            $settings = array();
+        }
+        // Only approved fields — do not merge arbitrary payload keys.
+        $settings['backend_url'] = untrailingslashit($backend_url);
+        $settings['backend_api_key'] = $backend_api_key;
+        $settings['outbound_status'] = 'configured';
+        $settings['outbound_configured_at'] = gmdate('c');
         update_option('vernal_contentum_settings', $settings);
+
+        $masked = substr($backend_api_key, 0, 4) . '…' . substr($backend_api_key, -4);
         
         return rest_ensure_response(array(
             'status' => 'success',
-            'message' => __('Backend settings configured successfully', 'vernal-contentum')
+            'message' => __('Backend settings configured successfully', 'vernal-contentum'),
+            'backend_url' => $settings['backend_url'],
+            'backend_api_key_masked' => $masked,
+            'outbound_configured' => true,
         ));
     }
 
@@ -754,14 +806,24 @@ class Vernal_API {
             Vernal_Code_Fields::register_field_group();
             $group_registered = Vernal_Code_Fields::is_group_registered() || $acf_active;
         }
+        $settings = get_option('vernal_contentum_settings', array());
+        $outbound_configured = false;
+        if (is_array($settings) && !empty($settings['backend_url']) && !empty($settings['backend_api_key'])) {
+            $outbound_configured = true;
+        }
+        if (defined('VERNAL_BACKEND_URL') && defined('VERNAL_BACKEND_API_KEY')) {
+            $outbound_configured = true;
+        }
         return rest_ensure_response(array(
             'success' => true,
             'data' => array(
                 'site_url' => site_url(),
                 'home_url' => home_url(),
+                'plugin_version' => defined('VERNAL_CONTENTUM_VERSION') ? VERNAL_CONTENTUM_VERSION : '',
                 'acf_active' => $acf_active,
                 'code_field_group_registered' => $group_registered,
                 'post_type_supports_meta' => post_type_exists('post'),
+                'outbound_configured' => $outbound_configured,
                 'upload' => array(
                     'max_upload_bytes' => $max_upload,
                     'allowed_mime_types' => array_values(get_allowed_mime_types()),
@@ -769,6 +831,7 @@ class Vernal_API {
                 'capabilities' => array(
                     'media' => true,
                     'code_fields' => true,
+                    'configure_backend' => true,
                 ),
             ),
         ));
