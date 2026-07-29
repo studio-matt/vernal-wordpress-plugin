@@ -83,8 +83,10 @@ The plugin includes the `plugin-update-checker` library which:
 
 ## Notes
 
+- The GitHub repository must be **public**, or WordPress sites must define `VERNAL_GITHUB_TOKEN` in `wp-config.php` (fine-grained PAT with Contents: Read on this repo). Private repos return HTTP 404 to unauthenticated API calls, which breaks the update checker (`puc-github-http-error`).
 - The plugin checks for updates every 12 hours automatically
 - Users can manually check by clicking "Check for updates" on the Plugins page
 - Only releases (not pre-releases) are shown as updates
 - The ZIP file structure must have the plugin folder at the root level
+- Release assets must include `vernal-contentum.zip` (folder slug `vernal-contentum`)
 

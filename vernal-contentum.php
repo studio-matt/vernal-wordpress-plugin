@@ -3,7 +3,7 @@
  * Plugin Name: Vernal Contentum Bridge
  * Plugin URI: https://vernalcontentum.com
  * Description: Bridge between WordPress and Vernal Contentum web app for content creation and management
- * Version: 1.1.1
+ * Version: 1.1.2
  * Author: Vernal Contentum
  * License: GPL v2 or later
  * Text Domain: vernal-contentum
@@ -17,7 +17,7 @@ if (!defined('ABSPATH')) {
 }
 
 // Define plugin constants
-define('VERNAL_CONTENTUM_VERSION', '1.1.1');
+define('VERNAL_CONTENTUM_VERSION', '1.1.2');
 define('VERNAL_CONTENTUM_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('VERNAL_CONTENTUM_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('VERNAL_CONTENTUM_PLUGIN_BASENAME', plugin_basename(__FILE__));
@@ -32,9 +32,15 @@ $updateChecker = PucFactory::buildUpdateChecker(
     'vernal-contentum'
 );
 
-// Enable GitHub Releases support
+// Enable GitHub Releases support (ZIP asset required on the release)
 $updateChecker->getVcsApi()->enableReleaseAssets();
 
+// Private-repo support: define VERNAL_GITHUB_TOKEN in wp-config.php
+// (fine-grained PAT with Contents: Read on this repository only).
+// Public repos do not need a token.
+if (defined('VERNAL_GITHUB_TOKEN') && VERNAL_GITHUB_TOKEN) {
+    $updateChecker->setAuthentication(VERNAL_GITHUB_TOKEN);
+}
 // Include required files
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-settings.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-code-fields.php';
