@@ -3,6 +3,40 @@
  */
 (function($) {
     'use strict';
+
+    function runConnectionCheck($button) {
+        var $status = $('#backend-connection-status');
+        var originalText = $button.length ? $button.text() : '';
+
+        if ($button.length) {
+            $button.prop('disabled', true).text('Checking…');
+        }
+        $status.html('<span style="color: #2271b1;">Checking…</span>');
+
+        return $.ajax({
+            url: vernalContentum.ajax_url,
+            type: 'POST',
+            data: {
+                action: 'vernal_test_backend_connection',
+                nonce: vernalContentum.nonce
+            }
+        }).done(function(response) {
+            if (response.success) {
+                $status.html('<span style="color: #46b450;">✓ Connected</span>');
+                $('#vernal-outbound-status-label').text('✓ Connected to Vernal').css({'color': '#46b450', 'font-weight': '600'});
+                $('#vernal-connection-status-panel').css('border-left-color', '#46b450');
+            } else {
+                $status.html('<span style="color: #dc3232;">✗ Not connected</span>');
+                $('#vernal-outbound-status-label').text('Waiting for connection from Vernal').css({'color': '#646970', 'font-weight': 'normal'});
+            }
+        }).fail(function() {
+            $status.html('<span style="color: #dc3232;">✗ Not connected</span>');
+        }).always(function() {
+            if ($button.length) {
+                $button.prop('disabled', false).text(originalText || 'Check connection');
+            }
+        });
+    }
     
     $(document).ready(function() {
         // Copy site URL / inbound API key fields
@@ -26,40 +60,15 @@
             }
         });
         
-        // Test backend connection button (admin + nonce required server-side)
-        $('#test-backend-connection').on('click', function() {
-            var $button = $(this);
-            var $status = $('#backend-connection-status');
-            var originalText = $button.text();
-            
-            $button.prop('disabled', true).text('Checking…');
-            $status.html('<span style="color: #2271b1;">Checking…</span>');
-            
-            $.ajax({
-                url: vernalContentum.ajax_url,
-                type: 'POST',
-                data: {
-                    action: 'vernal_test_backend_connection',
-                    nonce: vernalContentum.nonce
-                },
-                success: function(response) {
-                    if (response.success) {
-                        $status.html('<span style="color: #46b450;">✓ Connected</span>');
-                        $('#vernal-outbound-status-label').text('✓ Connected to Vernal').css({'color': '#46b450', 'font-weight': '600'});
-                        $('#vernal-connection-status-panel').css('border-left-color', '#46b450');
-                    } else {
-                        $status.html('<span style="color: #dc3232;">✗ Not connected</span>');
-                        $('#vernal-outbound-status-label').text('Waiting for connection from Vernal').css({'color': '#646970', 'font-weight': 'normal'});
-                    }
-                },
-                error: function() {
-                    $status.html('<span style="color: #dc3232;">✗ Not connected</span>');
-                },
-                complete: function() {
-                    $button.prop('disabled', false).text(originalText);
-                }
-            });
+        var $checkBtn = $('#test-backend-connection');
+        $checkBtn.on('click', function() {
+            runConnectionCheck($(this));
         });
+
+        // After Vernal connects, open this page to see verified status without clicking.
+        if (vernalContentum.auto_verify && $checkBtn.length) {
+            runConnectionCheck($checkBtn);
+        }
     });
     
 })(jQuery);

@@ -731,9 +731,18 @@ class Vernal_Settings {
         );
         
         // Localize script for AJAX
+        $settings = get_option('vernal_contentum_settings', array());
+        if (!is_array($settings)) {
+            $settings = array();
+        }
+        $outbound_status = isset($settings['outbound_status']) ? $settings['outbound_status'] : '';
+        $backend_configured = class_exists('Vernal_Backend_API') && Vernal_Backend_API::is_configured();
         wp_localize_script('vernal-contentum-admin', 'vernalContentum', array(
             'ajax_url' => admin_url('admin-ajax.php'),
-            'nonce' => wp_create_nonce('vernal_contentum_nonce')
+            'nonce' => wp_create_nonce('vernal_contentum_nonce'),
+            // Auto-run the same verify as "Check connection" when Vernal has configured
+            // but status is not yet the verified "connected" state.
+            'auto_verify' => ($backend_configured && $outbound_status !== 'connected'),
         ));
     }
     

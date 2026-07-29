@@ -3,7 +3,7 @@
  * Plugin Name: Vernal Contentum Bridge
  * Plugin URI: https://vernalcontentum.com
  * Description: Bridge between WordPress and Vernal Contentum web app for content creation and management
- * Version: 1.1.4
+ * Version: 1.1.5
  * Author: Vernal Contentum
  * License: GPL v2 or later
  * Text Domain: vernal-contentum
@@ -17,7 +17,7 @@ if (!defined('ABSPATH')) {
 }
 
 // Define plugin constants
-define('VERNAL_CONTENTUM_VERSION', '1.1.4');
+define('VERNAL_CONTENTUM_VERSION', '1.1.5');
 define('VERNAL_CONTENTUM_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('VERNAL_CONTENTUM_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('VERNAL_CONTENTUM_PLUGIN_BASENAME', plugin_basename(__FILE__));
@@ -29,7 +29,8 @@ use YahnisElsts\PluginUpdateChecker\v5\PucFactory;
 $updateChecker = PucFactory::buildUpdateChecker(
     'https://github.com/studio-matt/vernal-wordpress-plugin',
     __FILE__,
-    'vernal-contentum'
+    'vernal-contentum',
+    1 // Check GitHub Releases about every hour (default is 12)
 );
 
 // Enable GitHub Releases support (ZIP asset required on the release)
@@ -41,6 +42,21 @@ $updateChecker->getVcsApi()->enableReleaseAssets();
 if (defined('VERNAL_GITHUB_TOKEN') && VERNAL_GITHUB_TOKEN) {
     $updateChecker->setAuthentication(VERNAL_GITHUB_TOKEN);
 }
+
+// When an admin opens the Plugins screen, refresh update metadata at most hourly
+// so new GitHub releases surface without waiting for the longer default cron gap.
+add_action('load-plugins.php', function () use ($updateChecker) {
+    $key = 'vernal_puc_plugins_refresh_' . md5(home_url());
+    if (get_transient($key)) {
+        return;
+    }
+    try {
+        $updateChecker->checkForUpdates();
+    } catch (Exception $e) {
+        // Ignore checker errors; WP will retry on the normal schedule.
+    }
+    set_transient($key, 1, HOUR_IN_SECONDS);
+});
 // Include required files
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-settings.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-code-fields.php';
