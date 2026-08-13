@@ -221,14 +221,50 @@ class Vernal_API {
             );
         }
 
-        $existing = get_term_by('name', $name, 'category');
-        if ($existing && !is_wp_error($existing)) {
+        $parent = !empty($params['parent']) ? intval($params['parent']) : 0;
+        $slug = !empty($params['slug']) ? sanitize_title($params['slug']) : '';
+
+        // Prefer durable identity: slug + parent (supports same name under different parents).
+        if ($slug !== '') {
+            $by_slug = get_terms(array(
+                'taxonomy' => 'category',
+                'hide_empty' => false,
+                'slug' => $slug,
+                'parent' => $parent,
+                'number' => 1,
+            ));
+            if (!is_wp_error($by_slug) && !empty($by_slug)) {
+                $term = $by_slug[0];
+                return rest_ensure_response(array(
+                    'success' => true,
+                    'data' => array(
+                        'id' => (int) $term->term_id,
+                        'name' => $term->name,
+                        'slug' => $term->slug,
+                        'parent' => (int) $term->parent,
+                        'existing' => true,
+                    ),
+                ));
+            }
+        }
+
+        // Name match only within the requested parent scope (never collapse across parents).
+        $by_name = get_terms(array(
+            'taxonomy' => 'category',
+            'hide_empty' => false,
+            'name' => $name,
+            'parent' => $parent,
+            'number' => 1,
+        ));
+        if (!is_wp_error($by_name) && !empty($by_name)) {
+            $term = $by_name[0];
             return rest_ensure_response(array(
                 'success' => true,
                 'data' => array(
-                    'id' => (int) $existing->term_id,
-                    'name' => $existing->name,
-                    'slug' => $existing->slug,
+                    'id' => (int) $term->term_id,
+                    'name' => $term->name,
+                    'slug' => $term->slug,
+                    'parent' => (int) $term->parent,
                     'existing' => true,
                 ),
             ));
@@ -238,15 +274,38 @@ class Vernal_API {
         if (!empty($params['description'])) {
             $args['description'] = sanitize_textarea_field($params['description']);
         }
-        if (!empty($params['parent'])) {
-            $args['parent'] = intval($params['parent']);
+        if ($parent > 0) {
+            $args['parent'] = $parent;
         }
-        if (!empty($params['slug'])) {
-            $args['slug'] = sanitize_title($params['slug']);
+        if ($slug !== '') {
+            $args['slug'] = $slug;
         }
 
         $result = wp_insert_term($name, 'category', $args);
         if (is_wp_error($result)) {
+            // Race: another request created the same slug/parent — re-fetch.
+            if ($slug !== '') {
+                $retry = get_terms(array(
+                    'taxonomy' => 'category',
+                    'hide_empty' => false,
+                    'slug' => $slug,
+                    'parent' => $parent,
+                    'number' => 1,
+                ));
+                if (!is_wp_error($retry) && !empty($retry)) {
+                    $term = $retry[0];
+                    return rest_ensure_response(array(
+                        'success' => true,
+                        'data' => array(
+                            'id' => (int) $term->term_id,
+                            'name' => $term->name,
+                            'slug' => $term->slug,
+                            'parent' => (int) $term->parent,
+                            'existing' => true,
+                        ),
+                    ));
+                }
+            }
             return $result;
         }
 
@@ -257,6 +316,7 @@ class Vernal_API {
                 'id' => (int) $term->term_id,
                 'name' => $term->name,
                 'slug' => $term->slug,
+                'parent' => (int) $term->parent,
                 'existing' => false,
             ),
         ));
