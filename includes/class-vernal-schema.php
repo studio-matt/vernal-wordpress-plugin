@@ -5,6 +5,10 @@
  * Vernal owns TOC + heading extraction from semantic content.
  * Article JSON-LD / BreadcrumbList emit only when no supported SEO plugin is active
  * (single schema authority).
+ *
+ * TOC injection rules:
+ * - Articles: once via the_content, at the top of the body (guarded against double apply_filters).
+ * - Show landings: once via ACF ih_show_summary only — never via the_content.
  */
 
 if (!defined('ABSPATH')) {
@@ -14,6 +18,12 @@ if (!defined('ABSPATH')) {
 class Vernal_Schema {
     
     private static $instance = null;
+
+    /** @var bool Request-scoped: the_content TOC already injected */
+    private $toc_injected_via_content = false;
+
+    /** @var array<int,bool> Request-scoped: ACF TOC already injected per post */
+    private $toc_injected_via_acf = array();
     
     public static function get_instance() {
         if (null === self::$instance) {
@@ -55,6 +65,13 @@ class Vernal_Schema {
         return ($post && isset($post->post_content)) ? $post->post_content : '';
     }
 
+    private function content_has_vernal_toc($html) {
+        if (!is_string($html) || $html === '') {
+            return false;
+        }
+        return (strpos($html, 'vernal-toc') !== false);
+    }
+
     private function build_toc_html($headings) {
         $options = get_option('vernal_contentum_settings', array());
         $label = esc_html($options['toc_label'] ?? 'In This Article...');
@@ -77,10 +94,15 @@ class Vernal_Schema {
     }
     
     /**
-     * Add table of contents to content
+     * Add table of contents to post body (articles only).
      */
     public function add_table_of_contents($content) {
         if (!is_singular() || is_admin()) {
+            return $content;
+        }
+
+        // Themes/Elementor often run the_content more than once.
+        if ($this->toc_injected_via_content || $this->content_has_vernal_toc($content)) {
             return $content;
         }
         
@@ -89,24 +111,21 @@ class Vernal_Schema {
             return $content;
         }
 
-        // Prefer semantic content for heading detection; inject into filtered content
-        // only when this content stream actually carries those headings (articles).
-        $semantic = $this->semantic_html();
-        $source = $semantic !== '' ? $semantic : $content;
-        $headings = $this->get_headings($source);
-        if (count($headings) < 2) {
-            return $content;
-        }
-
-        // If headings live only in ACF (show landing), do not double-inject into empty body
-        $body_headings = $this->get_headings($content);
-        if (count($body_headings) < 2 && class_exists('Vernal_Semantic_Content')) {
+        // Show landings: TOC belongs on ACF summary only — never on placeholder body.
+        if (class_exists('Vernal_Semantic_Content')) {
             $kind = Vernal_Semantic_Content::get_instance()->detect_kind(null);
             if ($kind === 'show_landing') {
                 return $content;
             }
         }
+
+        // Only inject when THIS content stream has the headings (do not borrow ACF).
+        $headings = $this->get_headings($content);
+        if (count($headings) < 2) {
+            return $content;
+        }
         
+        $this->toc_injected_via_content = true;
         $toc = $this->build_toc_html($headings);
         $content = $this->add_ids_to_headings($content, $headings);
         
@@ -114,7 +133,7 @@ class Vernal_Schema {
     }
 
     /**
-     * Prepend TOC into ACF show summary for Elementor templates.
+     * Prepend TOC into ACF show summary for Elementor templates (once per post/request).
      */
     public function prepend_toc_to_acf_summary($value, $post_id, $field) {
         if (is_admin() || !is_singular()) {
@@ -127,13 +146,21 @@ class Vernal_Schema {
         if (empty($options['show_toc'])) {
             return $value;
         }
-        // Avoid double TOC if already present
-        if (strpos($value, "class='vernal-toc'") !== false || strpos($value, 'class="vernal-toc"') !== false) {
+        if ($this->content_has_vernal_toc($value)) {
+            return $value;
+        }
+        $post_id = (int) $post_id;
+        if ($post_id > 0 && !empty($this->toc_injected_via_acf[$post_id])) {
+            // Already injected for this post in this request; return value unchanged
+            // so a second Elementor get_field does not prepend another TOC.
             return $value;
         }
         $headings = $this->get_headings($value);
         if (count($headings) < 2) {
             return $value;
+        }
+        if ($post_id > 0) {
+            $this->toc_injected_via_acf[$post_id] = true;
         }
         $value = $this->add_ids_to_headings($value, $headings);
         return $this->build_toc_html($headings) . $value;
