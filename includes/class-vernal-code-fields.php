@@ -27,6 +27,33 @@ class Vernal_Code_Fields {
         add_action('acf/init', array(__CLASS__, 'register_field_group'));
         // Also try on init if ACF already loaded
         add_action('init', array(__CLASS__, 'maybe_register'), 20);
+        // Elementor Posts widget: set Query ID = machine_show_blog_articles
+        add_action('elementor/query/machine_show_blog_articles', array(__CLASS__, 'elementor_query_show_blog_articles'));
+    }
+
+    /**
+     * Filter Elementor Posts query to this show's Blog category leaf
+     * (machine_blog_category_id on the current singular post).
+     */
+    public static function elementor_query_show_blog_articles($query) {
+        $post_id = get_the_ID();
+        if (!$post_id && !empty($GLOBALS['post']->ID)) {
+            $post_id = (int) $GLOBALS['post']->ID;
+        }
+        if (!$post_id) {
+            return;
+        }
+        $cat_id = 0;
+        if (function_exists('get_field')) {
+            $cat_id = intval(get_field('machine_blog_category_id', $post_id));
+        }
+        if ($cat_id <= 0) {
+            $cat_id = intval(get_post_meta($post_id, 'machine_blog_category_id', true));
+        }
+        if ($cat_id > 0) {
+            $query->set('cat', $cat_id);
+            $query->set('category__in', array($cat_id));
+        }
     }
 
     public static function maybe_register() {
@@ -164,6 +191,17 @@ class Vernal_Code_Fields {
                 'readonly' => true,
                 'instructions' => 'Phase 1: heuristic_pass/fail only — not runtime validated.',
             )),
+            // Per-show Blog category (ongoing articles). Landing post stays on Default Show Category.
+            self::field('field_machine_blog_category_id', 'machine_blog_category_id', 'Show Blog Category ID', 'number', array(
+                'readonly' => true,
+                'instructions' => 'WP category id for this show\'s ongoing articles (e.g. 149). Use Elementor Query ID: machine_show_blog_articles.',
+            )),
+            self::field('field_machine_blog_category_slug', 'machine_blog_category_slug', 'Show Blog Category Slug', 'text', array(
+                'readonly' => true,
+            )),
+            self::field('field_machine_blog_category_name', 'machine_blog_category_name', 'Show Blog Category Name', 'text', array(
+                'readonly' => true,
+            )),
         );
 
         acf_add_local_field_group(array(
@@ -202,6 +240,7 @@ class Vernal_Code_Fields {
             'machine_ar_media_url', 'machine_ar_media_type', 'machine_ar_anchor_asset_url',
             'machine_ar_design_revision', 'machine_ar_status', 'machine_ar_experience_version',
             'machine_ar_anchor_state',
+            'machine_blog_category_id', 'machine_blog_category_slug', 'machine_blog_category_name',
         );
         $out = array();
         foreach ($names as $name) {
