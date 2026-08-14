@@ -1,14 +1,23 @@
-name: Build & Release Plugin (Manual)
+name: Build & Release Plugin
+
+# Automatic path (what we actually use):
+#   1. Bump Version in vernal-contentum.php, commit, push main (SSH deploy runs)
+#   2. git tag vX.Y.Z && git push origin vX.Y.Z  → this workflow builds ZIP + GitHub Release
+#
+# Optional: workflow_dispatch still available for a one-off rebuild.
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version number (e.g., 1.0.1)'
-        required: true
+        description: "Version number without v prefix (e.g. 1.2.1). Leave empty when re-running a tag."
+        required: false
         type: string
       release_notes:
-        description: 'Release notes (optional)'
+        description: "Release notes (optional)"
         required: false
         type: string
 
@@ -19,60 +28,66 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Set version
-        id: set_version
-        run: |
-          VERSION="${{ github.event.inputs.version }}"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Building version: $VERSION from production folder"
-
-      - name: Setup SSH
-        uses: webfactory/ssh-agent@v0.10.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-      
-      - name: Add server to known hosts
-        run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
-
-      - name: Update version in production files
-        run: |
-          VERSION="${{ steps.set_version.outputs.version }}"
-          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << EOF
-            cd ${{ secrets.SERVER_PATH }}
-            sed -i "s/Version: [0-9.]*/Version: \$VERSION/" vernal-contentum.php
-            sed -i "s/define('VERNAL_CONTENTUM_VERSION', '[^']*');/define('VERNAL_CONTENTUM_VERSION', '\$VERSION');/" vernal-contentum.php
-          EOF
-          echo "Version updated to $VERSION in production"
-
-      - name: Download files from production server
-        run: |
-          mkdir -p dist/vernal-contentum
-          rsync -avz \
-            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:${{ secrets.SERVER_PATH }} \
-            dist/vernal-contentum/
-
-      - name: Build ZIP from production files
-        run: |
-          PLUGIN_SLUG="vernal-contentum"
-          cd dist
-          zip -r ${PLUGIN_SLUG}.zip $PLUGIN_SLUG
-          
-          echo "ZIP created from production folder: ${PLUGIN_SLUG}.zip"
-          ls -lh ${PLUGIN_SLUG}.zip
-
-      - name: Checkout repo for tagging
+      - name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Create Git tag
+      - name: Resolve version
+        id: set_version
         run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+            if [ -z "$VERSION" ]; then
+              VERSION=$(grep -E "^\s*\*\s*Version:" vernal-contentum.php | head -1 | sed -E 's/.*Version:\s*([0-9.]+).*/\1/')
+            fi
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "Could not resolve version" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building release v$VERSION from git (tag/commit source of truth)"
+
+      - name: Build ZIP from repository
+        run: |
+          PLUGIN_SLUG="vernal-contentum"
+          VERSION="${{ steps.set_version.outputs.version }}"
+          mkdir -p dist
+          # Stage plugin files under the WP folder slug (required by update checker)
+          rsync -a \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='dist' \
+            --exclude='node_modules' \
+            --exclude='.DS_Store' \
+            --exclude='*.zip' \
+            ./ "dist/${PLUGIN_SLUG}/"
+          # Sanity: packaged version matches tag
+          PKG_VER=$(grep -E "^\s*\*\s*Version:" "dist/${PLUGIN_SLUG}/vernal-contentum.php" | head -1 | sed -E 's/.*Version:\s*([0-9.]+).*/\1/')
+          echo "Package Version header: $PKG_VER (tag/input: $VERSION)"
+          if [ "$PKG_VER" != "$VERSION" ]; then
+            echo "Refusing release: vernal-contentum.php Version ($PKG_VER) != tag/input ($VERSION)" >&2
+            exit 1
+          fi
+          cd dist
+          zip -qr "${PLUGIN_SLUG}.zip" "$PLUGIN_SLUG"
+          ls -lh "${PLUGIN_SLUG}.zip"
+
+      - name: Ensure git tag exists (dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          VERSION="${{ steps.set_version.outputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${{ steps.set_version.outputs.version }}" -m "Release version ${{ steps.set_version.outputs.version }}"
-          git push origin "v${{ steps.set_version.outputs.version }}"
+          if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
+            echo "Tag v${VERSION} already exists"
+          else
+            git tag -a "v${VERSION}" -m "Release version ${VERSION}"
+            git push origin "v${VERSION}"
+          fi
 
       - name: Create GitHub Release + upload asset
         uses: softprops/action-gh-release@v3
@@ -82,16 +97,16 @@ jobs:
           name: Release v${{ steps.set_version.outputs.version }}
           body: |
             ## Version ${{ steps.set_version.outputs.version }}
-            
-            ${{ github.event.inputs.release_notes || 'Official release built from production.' }}
-            
+
+            ${{ github.event.inputs.release_notes || 'Automated release from git tag. ZIP built from the tagged commit.' }}
+
             ### Installation
-            1. Download the ZIP file below
+            1. Download `vernal-contentum.zip` below
             2. Upload via WordPress Admin → Plugins → Add New → Upload Plugin
             3. Or extract to `/wp-content/plugins/vernal-contentum/`
-            
+
             ### Update
-            If you have the plugin installed, WordPress will automatically detect this update.
+            Sites with the plugin installed poll GitHub Releases (~hourly) and will see this update.
           draft: false
           prerelease: false
-
+          make_latest: true
