@@ -1,6 +1,10 @@
 <?php
 /**
  * Schema and Table of Contents Handler
+ *
+ * Vernal owns TOC + heading extraction from semantic content.
+ * Article JSON-LD / BreadcrumbList emit only when no supported SEO plugin is active
+ * (single schema authority).
  */
 
 if (!defined('ABSPATH')) {
@@ -19,14 +23,57 @@ class Vernal_Schema {
     }
     
     private function __construct() {
-        // Insert visual TOC in front-end content
+        // Insert visual TOC in front-end content (articles using the_content)
         add_filter('the_content', array($this, 'add_table_of_contents'), 8);
+
+        // Show landings: Elementor renders ACF ih_show_summary — prepend TOC there
+        add_filter('acf/format_value/name=ih_show_summary', array($this, 'prepend_toc_to_acf_summary'), 20, 3);
         
-        // Add Schema JSON-LD to head
+        // Add Schema JSON-LD to head (only when Vernal is schema authority)
         add_action('wp_head', array($this, 'add_schema_jsonld'), 10);
         
-        // Add BreadcrumbList schema
+        // Add BreadcrumbList schema (only when Vernal is schema authority)
         add_action('wp_head', array($this, 'add_breadcrumb_schema'), 50);
+    }
+
+    /**
+     * Vernal emits Article/Breadcrumb JSON-LD only when no supported SEO plugin owns schema.
+     */
+    private function vernal_is_schema_authority() {
+        if (class_exists('Vernal_SEO_Adapter')) {
+            return !Vernal_SEO_Adapter::get_instance()->has_supported_seo_plugin();
+        }
+        // If adapter not loaded, keep legacy behavior (emit)
+        return true;
+    }
+
+    private function semantic_html($post = null) {
+        if (class_exists('Vernal_Semantic_Content')) {
+            return Vernal_Semantic_Content::get_instance()->get_wp_semantic_content($post);
+        }
+        global $post;
+        return ($post && isset($post->post_content)) ? $post->post_content : '';
+    }
+
+    private function build_toc_html($headings) {
+        $options = get_option('vernal_contentum_settings', array());
+        $label = esc_html($options['toc_label'] ?? 'In This Article...');
+        $style = $options['toc_style'] ?? 'bullets';
+
+        $toc = "<nav class='vernal-toc'><strong>{$label}</strong>";
+        $toc .= $style === 'numbers' ? "<ol>" : "<ul>";
+
+        foreach ($headings as $h) {
+            $toc .= sprintf(
+                '<li><a href="#%s">%s</a></li>',
+                esc_attr($h['id']),
+                esc_html($h['text'])
+            );
+        }
+
+        $toc .= $style === 'numbers' ? "</ol>" : "</ul>";
+        $toc .= "</nav>";
+        return $toc;
     }
     
     /**
@@ -41,32 +88,55 @@ class Vernal_Schema {
         if (empty($options['show_toc'])) {
             return $content;
         }
-        
-        $headings = $this->get_headings($content);
+
+        // Prefer semantic content for heading detection; inject into filtered content
+        // only when this content stream actually carries those headings (articles).
+        $semantic = $this->semantic_html();
+        $source = $semantic !== '' ? $semantic : $content;
+        $headings = $this->get_headings($source);
         if (count($headings) < 2) {
             return $content;
         }
-        
-        $label = esc_html($options['toc_label'] ?? 'In This Article...');
-        $style = $options['toc_style'] ?? 'bullets';
-        
-        $toc = "<nav class='vernal-toc'><strong>{$label}</strong>";
-        $toc .= $style === 'numbers' ? "<ol>" : "<ul>";
-        
-        foreach ($headings as $h) {
-            $toc .= sprintf(
-                '<li><a href="#%s">%s</a></li>',
-                esc_attr($h['id']),
-                esc_html($h['text'])
-            );
+
+        // If headings live only in ACF (show landing), do not double-inject into empty body
+        $body_headings = $this->get_headings($content);
+        if (count($body_headings) < 2 && class_exists('Vernal_Semantic_Content')) {
+            $kind = Vernal_Semantic_Content::get_instance()->detect_kind(null);
+            if ($kind === 'show_landing') {
+                return $content;
+            }
         }
         
-        $toc .= $style === 'numbers' ? "</ol>" : "</ul>";
-        $toc .= "</nav>";
-        
+        $toc = $this->build_toc_html($headings);
         $content = $this->add_ids_to_headings($content, $headings);
         
         return $toc . $content;
+    }
+
+    /**
+     * Prepend TOC into ACF show summary for Elementor templates.
+     */
+    public function prepend_toc_to_acf_summary($value, $post_id, $field) {
+        if (is_admin() || !is_singular()) {
+            return $value;
+        }
+        if (!is_string($value) || trim($value) === '') {
+            return $value;
+        }
+        $options = get_option('vernal_contentum_settings', array());
+        if (empty($options['show_toc'])) {
+            return $value;
+        }
+        // Avoid double TOC if already present
+        if (strpos($value, "class='vernal-toc'") !== false || strpos($value, 'class="vernal-toc"') !== false) {
+            return $value;
+        }
+        $headings = $this->get_headings($value);
+        if (count($headings) < 2) {
+            return $value;
+        }
+        $value = $this->add_ids_to_headings($value, $headings);
+        return $this->build_toc_html($headings) . $value;
     }
     
     /**
@@ -121,22 +191,25 @@ class Vernal_Schema {
     }
     
     /**
-     * Add Schema JSON-LD to head
+     * Add Schema JSON-LD to head — only when Vernal is schema authority.
      */
     public function add_schema_jsonld() {
         if (!is_singular() || is_admin()) {
             return;
         }
+        if (!$this->vernal_is_schema_authority()) {
+            return;
+        }
         
         $options = get_option('vernal_contentum_settings', array());
-        // Default to enabled (1) if not set
         $show_schema = isset($options['show_schema']) ? $options['show_schema'] : 1;
         if (empty($show_schema)) {
             return;
         }
         
         global $post;
-        $headings = $this->get_headings($post->post_content);
+        $semantic = $this->semantic_html($post);
+        $headings = $this->get_headings($semantic);
         
         if (count($headings) < 2) {
             return;
@@ -156,7 +229,6 @@ class Vernal_Schema {
             return $h['text'];
         }, $headings);
         
-        // Logo logic
         if (!empty($options['use_site_logo'])) {
             $custom_logo_id = get_theme_mod('custom_logo');
             $logo_url = $custom_logo_id ? wp_get_attachment_image_url($custom_logo_id, 'full') : '';
@@ -165,7 +237,7 @@ class Vernal_Schema {
         }
         
         if (!$logo_url) {
-            $logo_url = get_site_url() . '/wp-content/uploads/logo.png'; // Fallback
+            $logo_url = get_site_url() . '/wp-content/uploads/logo.png';
         }
         
         $keywords = wp_get_post_tags($post->ID, array('fields' => 'names'));
@@ -182,7 +254,7 @@ class Vernal_Schema {
             );
         }
         
-        $summary_abstract = wp_trim_words(strip_tags($post->post_content), 40, "...");
+        $summary_abstract = wp_trim_words(strip_tags($semantic), 40, "...");
         
         $jsonld = array(
             "@context" => "https://schema.org",
@@ -196,7 +268,7 @@ class Vernal_Schema {
             "dateModified" => get_the_modified_date('c'),
             "inLanguage" => "en",
             "image" => $hero_image_meta,
-            "wordCount" => str_word_count(strip_tags($post->post_content)),
+            "wordCount" => str_word_count(strip_tags($semantic)),
             "author" => array(
                 "@type" => "Person",
                 "name" => get_the_author_meta('display_name', $post->post_author)
@@ -225,15 +297,17 @@ class Vernal_Schema {
     }
     
     /**
-     * Add BreadcrumbList schema
+     * BreadcrumbList — only when Vernal is schema authority.
      */
     public function add_breadcrumb_schema() {
         if (!is_singular() || is_admin()) {
             return;
         }
+        if (!$this->vernal_is_schema_authority()) {
+            return;
+        }
         
         $options = get_option('vernal_contentum_settings', array());
-        // Default to enabled (1) if not set
         $show_schema = isset($options['show_schema']) ? $options['show_schema'] : 1;
         if (empty($show_schema)) {
             return;
@@ -261,4 +335,3 @@ class Vernal_Schema {
         echo '<script type="application/ld+json">' . json_encode($breadcrumb, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . '</script>';
     }
 }
-

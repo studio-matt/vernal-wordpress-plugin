@@ -3,12 +3,12 @@
  * Plugin Name: Vernal Contentum Bridge
  * Plugin URI: https://vernalcontentum.com
  * Description: Bridge between WordPress and Vernal Contentum web app for content creation and management
- * Version: 1.1.5
+ * Version: 1.2.0
  * Author: Vernal Contentum
  * License: GPL v2 or later
  * Text Domain: vernal-contentum
  *
- * Last updated: Shirt print media sideload + ACF gallery sync for Printful.
+ * Last updated: Vernal SEO Manifest adapter + semantic content resolver + schema authority.
  */
 
 // Exit if accessed directly
@@ -17,7 +17,7 @@ if (!defined('ABSPATH')) {
 }
 
 // Define plugin constants
-define('VERNAL_CONTENTUM_VERSION', '1.1.5');
+define('VERNAL_CONTENTUM_VERSION', '1.2.0');
 define('VERNAL_CONTENTUM_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('VERNAL_CONTENTUM_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('VERNAL_CONTENTUM_PLUGIN_BASENAME', plugin_basename(__FILE__));
@@ -60,6 +60,8 @@ add_action('load-plugins.php', function () use ($updateChecker) {
 // Include required files
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-settings.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-code-fields.php';
+require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-semantic-content.php';
+require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-seo-adapter.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-api.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-backend-api.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-sitemap.php';
@@ -92,6 +94,10 @@ class Vernal_Contentum {
         
         // Initialize sitemap handler
         Vernal_Sitemap::get_instance();
+
+        // Semantic content + SEO adapter (before schema so authority checks work)
+        Vernal_Semantic_Content::get_instance();
+        Vernal_SEO_Adapter::get_instance();
         
         // Initialize schema/TOC handler
         Vernal_Schema::get_instance();

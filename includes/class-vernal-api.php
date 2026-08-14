@@ -433,13 +433,12 @@ class Vernal_API {
         
         // Set excerpt if provided
         if (!empty($params['excerpt'])) {
-            update_post_meta($post_id, '_wp_old_slug', ''); // Clear old slug
             wp_update_post(array(
                 'ID' => $post_id,
                 'post_excerpt' => sanitize_textarea_field($params['excerpt'])
             ));
         }
-        
+
         // Set custom meta if provided (supports arrays/objects as JSON)
         if (!empty($params['meta']) && is_array($params['meta'])) {
             foreach ($params['meta'] as $key => $value) {
@@ -459,6 +458,20 @@ class Vernal_API {
             }
         } elseif ($thumbnail_attachment_id) {
             $this->set_acf_or_meta($post_id, 'thumbnail', $thumbnail_attachment_id);
+        }
+
+        // Vernal SEO Manifest → adapter (slug / excerpt sync / AIOSEO or native)
+        // Meta (e.g. vernal_episode_id) must be set first so semantic kind detection works later.
+        if (class_exists('Vernal_SEO_Adapter')) {
+            Vernal_SEO_Adapter::get_instance()->apply_from_request($post_id, $params);
+        } elseif (!empty($params['slug'])) {
+            $slug = sanitize_title($params['slug']);
+            if ($slug) {
+                wp_update_post(array(
+                    'ID' => $post_id,
+                    'post_name' => $slug,
+                ));
+            }
         }
 
         // PowerPress enclosure — Media URL must point at Blubrry CDN (or other public host).
