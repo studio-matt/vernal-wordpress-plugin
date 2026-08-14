@@ -603,7 +603,7 @@ class Vernal_API {
                 $verified[$acf_key] = $this->read_acf_or_meta($post_id, $acf_key);
             }
             // Always surface guest name + shirt galleries for ops debugging
-            foreach (array('ih_guest_name', 'shirt_prints', 'shirt_prints_back', 'shirt_front', 'shirt_back') as $probe) {
+            foreach (array('ih_guests_name', 'ih_guest_name', 'shirt_prints', 'shirt_prints_back', 'shirt_front', 'shirt_back') as $probe) {
                 if (!array_key_exists($probe, $verified)) {
                     $verified[$probe] = $this->read_acf_or_meta($post_id, $probe);
                 }
