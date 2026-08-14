@@ -192,15 +192,16 @@ class Vernal_Code_Fields {
                 'instructions' => 'Phase 1: heuristic_pass/fail only — not runtime validated.',
             )),
             // Per-show Blog category (ongoing articles). Landing post stays on Default Show Category.
+            // Per-show Blog category (ongoing articles). Landing post stays on Default Show Category.
+            // Not readonly/disabled — Elementor conditionals omit disabled ACF fields from the picker.
             self::field('field_machine_blog_category_id', 'machine_blog_category_id', 'Show Blog Category ID', 'number', array(
-                'readonly' => true,
-                'instructions' => 'WP category id for this show\'s ongoing articles (e.g. 149). Use Elementor Query ID: machine_show_blog_articles.',
+                'instructions' => 'WP category id for this show\'s ongoing articles (e.g. 149). Elementor Query ID: machine_show_blog_articles.',
             )),
             self::field('field_machine_blog_category_slug', 'machine_blog_category_slug', 'Show Blog Category Slug', 'text', array(
-                'readonly' => true,
+                'instructions' => 'Slug for the show Blog category (e.g. bill-quateman).',
             )),
             self::field('field_machine_blog_category_name', 'machine_blog_category_name', 'Show Blog Category Name', 'text', array(
-                'readonly' => true,
+                'instructions' => 'Display name for the show Blog category.',
             )),
         );
 
