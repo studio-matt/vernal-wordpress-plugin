@@ -45,6 +45,20 @@ class Vernal_API {
             'callback' => array($this, 'create_category'),
             'permission_callback' => array($this, 'check_api_key'),
         ));
+
+        // Categories endpoint (update parent / name)
+        register_rest_route($namespace, '/categories/(?P<id>\d+)', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'update_category'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+
+        // Categories endpoint (delete)
+        register_rest_route($namespace, '/categories/(?P<id>\d+)', array(
+            'methods' => 'DELETE',
+            'callback' => array($this, 'delete_category'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
         
         // Authors endpoint
         register_rest_route($namespace, '/authors', array(
@@ -263,7 +277,7 @@ class Vernal_API {
             }
         }
 
-        // Name match only within the requested parent scope (never collapse across parents).
+        // Name match within the requested parent scope first.
         $by_name = get_terms(array(
             'taxonomy' => 'category',
             'hide_empty' => false,
@@ -273,6 +287,27 @@ class Vernal_API {
         ));
         if (!is_wp_error($by_name) && !empty($by_name)) {
             $term = $by_name[0];
+            return rest_ensure_response(array(
+                'success' => true,
+                'data' => array(
+                    'id' => (int) $term->term_id,
+                    'name' => $term->name,
+                    'slug' => $term->slug,
+                    'parent' => (int) $term->parent,
+                    'existing' => true,
+                ),
+            ));
+        }
+
+        // Reuse an existing same-name category under any parent (avoid bill-quateman-2 dupes).
+        $by_name_any = get_terms(array(
+            'taxonomy' => 'category',
+            'hide_empty' => false,
+            'name' => $name,
+            'number' => 1,
+        ));
+        if (!is_wp_error($by_name_any) && !empty($by_name_any)) {
+            $term = $by_name_any[0];
             return rest_ensure_response(array(
                 'success' => true,
                 'data' => array(
@@ -333,6 +368,98 @@ class Vernal_API {
                 'slug' => $term->slug,
                 'parent' => (int) $term->parent,
                 'existing' => false,
+            ),
+        ));
+    }
+
+    /**
+     * Update a WordPress category (parent / name / slug).
+     */
+    public function update_category($request) {
+        $term_id = intval($request['id']);
+        $term = get_term($term_id, 'category');
+        if (!$term || is_wp_error($term)) {
+            return new WP_Error(
+                'not_found',
+                __('Category not found', 'vernal-contentum'),
+                array('status' => 404)
+            );
+        }
+        $params = $request->get_json_params();
+        if (!is_array($params)) {
+            $params = array();
+        }
+        $args = array();
+        if (isset($params['name']) && is_string($params['name']) && $params['name'] !== '') {
+            $args['name'] = sanitize_text_field($params['name']);
+        }
+        if (isset($params['slug']) && is_string($params['slug']) && $params['slug'] !== '') {
+            $args['slug'] = sanitize_title($params['slug']);
+        }
+        if (array_key_exists('parent', $params)) {
+            $args['parent'] = max(0, intval($params['parent']));
+        }
+        if (isset($params['description'])) {
+            $args['description'] = sanitize_textarea_field($params['description']);
+        }
+        if (empty($args)) {
+            return rest_ensure_response(array(
+                'success' => true,
+                'data' => array(
+                    'id' => (int) $term->term_id,
+                    'name' => $term->name,
+                    'slug' => $term->slug,
+                    'parent' => (int) $term->parent,
+                    'updated' => false,
+                ),
+            ));
+        }
+        $result = wp_update_term($term_id, 'category', $args);
+        if (is_wp_error($result)) {
+            return $result;
+        }
+        $term = get_term($term_id, 'category');
+        return rest_ensure_response(array(
+            'success' => true,
+            'data' => array(
+                'id' => (int) $term->term_id,
+                'name' => $term->name,
+                'slug' => $term->slug,
+                'parent' => (int) $term->parent,
+                'updated' => true,
+            ),
+        ));
+    }
+
+    /**
+     * Delete a WordPress category.
+     */
+    public function delete_category($request) {
+        $term_id = intval($request['id']);
+        $term = get_term($term_id, 'category');
+        if (!$term || is_wp_error($term)) {
+            return new WP_Error(
+                'not_found',
+                __('Category not found', 'vernal-contentum'),
+                array('status' => 404)
+            );
+        }
+        $deleted = wp_delete_term($term_id, 'category');
+        if (is_wp_error($deleted)) {
+            return $deleted;
+        }
+        if (!$deleted) {
+            return new WP_Error(
+                'delete_failed',
+                __('Failed to delete category', 'vernal-contentum'),
+                array('status' => 500)
+            );
+        }
+        return rest_ensure_response(array(
+            'success' => true,
+            'data' => array(
+                'id' => $term_id,
+                'deleted' => true,
             ),
         ));
     }
