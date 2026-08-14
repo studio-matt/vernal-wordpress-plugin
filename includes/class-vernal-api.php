@@ -592,6 +592,19 @@ class Vernal_API {
             $this->set_powerpress_enclosure($post_id, $params['powerpress']);
             $updated_keys[] = 'powerpress';
         }
+        if (!empty($params['category_ids']) && is_array($params['category_ids'])) {
+            $category_ids = array_values(array_filter(array_map('intval', $params['category_ids'])));
+            if (!empty($category_ids)) {
+                wp_set_post_categories($post_id, $category_ids);
+                $updated_keys[] = 'category_ids';
+            }
+        } elseif (isset($params['category_id']) && $params['category_id'] !== '' && $params['category_id'] !== null) {
+            $cid = intval($params['category_id']);
+            if ($cid > 0) {
+                wp_set_post_categories($post_id, array($cid));
+                $updated_keys[] = 'category_id';
+            }
+        }
         $verified = array();
         if (!empty($params['acf']) && is_array($params['acf'])) {
             $this->apply_acf_fields($post_id, $params['acf'], 0);
