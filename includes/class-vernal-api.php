@@ -592,9 +592,22 @@ class Vernal_API {
             $this->set_powerpress_enclosure($post_id, $params['powerpress']);
             $updated_keys[] = 'powerpress';
         }
+        $verified = array();
         if (!empty($params['acf']) && is_array($params['acf'])) {
             $this->apply_acf_fields($post_id, $params['acf'], 0);
             $updated_keys = array_merge($updated_keys, array_keys($params['acf']));
+            foreach (array_keys($params['acf']) as $acf_key) {
+                if (!is_string($acf_key) || $acf_key === '') {
+                    continue;
+                }
+                $verified[$acf_key] = $this->read_acf_or_meta($post_id, $acf_key);
+            }
+            // Always surface guest name + shirt galleries for ops debugging
+            foreach (array('ih_guest_name', 'shirt_prints', 'shirt_prints_back', 'shirt_front', 'shirt_back') as $probe) {
+                if (!array_key_exists($probe, $verified)) {
+                    $verified[$probe] = $this->read_acf_or_meta($post_id, $probe);
+                }
+            }
         }
 
         return rest_ensure_response(array(
@@ -603,6 +616,7 @@ class Vernal_API {
                 'id' => $post_id,
                 'url' => get_permalink($post_id),
                 'updated_keys' => array_values(array_unique($updated_keys)),
+                'verified_acf' => $verified,
             ),
         ));
     }
@@ -698,6 +712,9 @@ class Vernal_API {
         $this->set_acf_or_meta($post_id, 'shirt_prints_back', $back_ids);
         $this->set_acf_or_meta($post_id, 'shirt_prints_json', wp_json_encode($front_meta));
         $this->set_acf_or_meta($post_id, 'shirt_prints_back_json', wp_json_encode($back_meta));
+        // Aliases if the site created Gallery fields as shirt_front / shirt_back
+        $this->set_acf_or_meta($post_id, 'shirt_front', $front_ids);
+        $this->set_acf_or_meta($post_id, 'shirt_back', $back_ids);
 
         return array(
             'front_ids' => $front_ids,
@@ -799,14 +816,33 @@ class Vernal_API {
     }
 
     /**
-     * Write ACF field when available; fall back to post meta.
+     * Write ACF field when available; always mirror to post meta as a fallback
+     * for Elementor custom-field tags and misconfigured field keys.
      */
     private function set_acf_or_meta($post_id, $key, $value) {
         if (function_exists('update_field')) {
-            update_field($key, $value, $post_id);
+            // Strict false = field missing / update failed. Empty string is a valid write.
+            $result = update_field($key, $value, $post_id);
+            if ($result === false) {
+                $this->set_post_meta_value($post_id, $key, $value);
+            }
             return;
         }
         $this->set_post_meta_value($post_id, $key, $value);
+    }
+
+    /**
+     * Read an ACF field value, falling back to post meta.
+     */
+    private function read_acf_or_meta($post_id, $key) {
+        if (function_exists('get_field')) {
+            $val = get_field($key, $post_id);
+            if ($val !== null && $val !== false) {
+                return $val;
+            }
+        }
+        $meta = get_post_meta($post_id, $key, true);
+        return ($meta === '' || $meta === false) ? null : $meta;
     }
 
     /**
