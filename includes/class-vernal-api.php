@@ -117,6 +117,21 @@ class Vernal_API {
                 ),
             ),
         ));
+
+        // Update Show Notes ACF on an existing landing post (API key; bypasses wp/v2 edit caps)
+        register_rest_route($namespace, '/posts/(?P<id>\d+)/show-notes', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'update_show_notes'),
+            'permission_callback' => array($this, 'check_api_key'),
+            'args' => array(
+                'id' => array(
+                    'required' => true,
+                    'validate_callback' => function ($param) {
+                        return is_numeric($param);
+                    },
+                ),
+            ),
+        ));
     }
     
     /**
@@ -448,14 +463,7 @@ class Vernal_API {
 
         // ACF fields (preferred when Advanced Custom Fields is active)
         if (!empty($params['acf']) && is_array($params['acf'])) {
-            foreach ($params['acf'] as $key => $value) {
-                // Image field: prefer attachment ID from sideload
-                if ($key === 'thumbnail' && $thumbnail_attachment_id) {
-                    $this->set_acf_or_meta($post_id, $key, $thumbnail_attachment_id);
-                    continue;
-                }
-                $this->set_acf_or_meta($post_id, $key, $value);
-            }
+            $this->apply_acf_fields($post_id, $params['acf'], $thumbnail_attachment_id);
         } elseif ($thumbnail_attachment_id) {
             $this->set_acf_or_meta($post_id, 'thumbnail', $thumbnail_attachment_id);
         }
@@ -533,6 +541,68 @@ class Vernal_API {
                 'shirt_print_back_attachment_ids' => $result['back_ids'],
                 'count_front' => count($result['front_ids']),
                 'count_back' => count($result['back_ids']),
+            ),
+        ));
+    }
+
+    /**
+     * Update Show Notes ACF fields on an existing episode landing post.
+     *
+     * Accepts the same `acf` map as create_post. Image fields that receive a URL
+     * (e.g. ih_guest_headshot) are sideloaded into the Media Library first.
+     */
+    public function update_show_notes($request) {
+        $post_id = intval($request['id']);
+        $post = get_post($post_id);
+        if (!$post) {
+            return new WP_Error(
+                'not_found',
+                __('Post not found', 'vernal-contentum'),
+                array('status' => 404)
+            );
+        }
+        $params = $request->get_json_params();
+        if (!is_array($params)) {
+            $params = array();
+        }
+
+        $updated_keys = array();
+        if (!empty($params['title'])) {
+            wp_update_post(array(
+                'ID' => $post_id,
+                'post_title' => sanitize_text_field($params['title']),
+            ));
+            $updated_keys[] = 'title';
+        }
+        if (isset($params['excerpt'])) {
+            wp_update_post(array(
+                'ID' => $post_id,
+                'post_excerpt' => sanitize_textarea_field($params['excerpt']),
+            ));
+            $updated_keys[] = 'excerpt';
+        }
+        if (!empty($params['status']) && in_array($params['status'], array('draft', 'publish', 'private', 'pending'), true)) {
+            wp_update_post(array(
+                'ID' => $post_id,
+                'post_status' => $params['status'],
+            ));
+            $updated_keys[] = 'status';
+        }
+        if (!empty($params['powerpress']) && is_array($params['powerpress'])) {
+            $this->set_powerpress_enclosure($post_id, $params['powerpress']);
+            $updated_keys[] = 'powerpress';
+        }
+        if (!empty($params['acf']) && is_array($params['acf'])) {
+            $this->apply_acf_fields($post_id, $params['acf'], 0);
+            $updated_keys = array_merge($updated_keys, array_keys($params['acf']));
+        }
+
+        return rest_ensure_response(array(
+            'success' => true,
+            'data' => array(
+                'id' => $post_id,
+                'url' => get_permalink($post_id),
+                'updated_keys' => array_values(array_unique($updated_keys)),
             ),
         ));
     }
@@ -673,6 +743,59 @@ class Vernal_API {
             return;
         }
         update_post_meta($post_id, $meta_key, is_string($value) ? sanitize_text_field($value) : $value);
+    }
+
+    /**
+     * Write ACF map onto a post. Image-like keys with http(s) values are sideloaded.
+     *
+     * @param int   $post_id
+     * @param array $acf
+     * @param int   $thumbnail_attachment_id Optional featured image already sideloaded for `thumbnail`.
+     */
+    private function apply_acf_fields($post_id, $acf, $thumbnail_attachment_id = 0) {
+        if (!is_array($acf)) {
+            return;
+        }
+        $image_keys = array(
+            'thumbnail',
+            'ih_guest_headshot',
+            'ih_guest_headshot_url',
+        );
+        foreach ($acf as $key => $value) {
+            $key = is_string($key) ? $key : '';
+            if ($key === '') {
+                continue;
+            }
+            // Alias: Machine may send URL under *_url; write to the real image field.
+            $target_key = ($key === 'ih_guest_headshot_url') ? 'ih_guest_headshot' : $key;
+
+            if ($target_key === 'thumbnail' && $thumbnail_attachment_id) {
+                $this->set_acf_or_meta($post_id, 'thumbnail', $thumbnail_attachment_id);
+                continue;
+            }
+
+            if (in_array($key, $image_keys, true) || in_array($target_key, $image_keys, true)) {
+                if (is_numeric($value)) {
+                    $this->set_acf_or_meta($post_id, $target_key, intval($value));
+                    continue;
+                }
+                $url = is_string($value) ? esc_url_raw(trim($value)) : '';
+                if ($url && preg_match('#^https?://#i', $url)) {
+                    $att = $this->sideload_image_attachment($post_id, $url);
+                    if ($att) {
+                        $this->set_acf_or_meta($post_id, $target_key, $att);
+                    }
+                    continue;
+                }
+                // Empty string clears the image field
+                if ($value === '' || $value === null) {
+                    $this->set_acf_or_meta($post_id, $target_key, null);
+                }
+                continue;
+            }
+
+            $this->set_acf_or_meta($post_id, $target_key, $value);
+        }
     }
 
     /**
