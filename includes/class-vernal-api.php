@@ -146,6 +146,43 @@ class Vernal_API {
                 ),
             ),
         ));
+
+        // Show landings list (legacy retrofit + Machine reconcile)
+        register_rest_route($namespace, '/shows', array(
+            'methods' => 'GET',
+            'callback' => array($this, 'list_shows'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+
+        // Single show landing snapshot (authoritative for diagnose/reconcile/verify)
+        register_rest_route($namespace, '/shows/(?P<id>\d+)', array(
+            'methods' => 'GET',
+            'callback' => array($this, 'get_show'),
+            'permission_callback' => array($this, 'check_api_key'),
+            'args' => array(
+                'id' => array(
+                    'required' => true,
+                    'validate_callback' => function ($param) {
+                        return is_numeric($param);
+                    },
+                ),
+            ),
+        ));
+
+        // Patch show meta used by retrofit (show_number, OCR advisory) without touching publication
+        register_rest_route($namespace, '/shows/(?P<id>\d+)/meta', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'update_show_meta'),
+            'permission_callback' => array($this, 'check_api_key'),
+            'args' => array(
+                'id' => array(
+                    'required' => true,
+                    'validate_callback' => function ($param) {
+                        return is_numeric($param);
+                    },
+                ),
+            ),
+        ));
     }
     
     /**
@@ -677,6 +714,9 @@ class Vernal_API {
      *
      * Accepts the same `acf` map as create_post. Image fields that receive a URL
      * (e.g. ih_guest_headshot) are sideloaded into the Media Library first.
+     *
+     * When preserve_publication is true (retrofit): never change status, slug, author,
+     * post_date*, or a valid existing PowerPress enclosure.
      */
     public function update_show_notes($request) {
         $post_id = intval($request['id']);
@@ -693,22 +733,45 @@ class Vernal_API {
             $params = array();
         }
 
+        $preserve = !empty($params['preserve_publication']);
+        $saved_date = $post->post_date;
+        $saved_date_gmt = $post->post_date_gmt;
+        $saved_name = $post->post_name;
+        $saved_author = intval($post->post_author);
+        $existing_enclosure = $this->read_powerpress_enclosure($post_id);
+
         $updated_keys = array();
         if (!empty($params['title'])) {
-            wp_update_post(array(
+            $update = array(
                 'ID' => $post_id,
                 'post_title' => sanitize_text_field($params['title']),
-            ));
+            );
+            if ($preserve) {
+                $update['post_date'] = $saved_date;
+                $update['post_date_gmt'] = $saved_date_gmt;
+                $update['post_name'] = $saved_name;
+                $update['post_author'] = $saved_author;
+                $update['edit_date'] = true;
+            }
+            wp_update_post($update);
             $updated_keys[] = 'title';
         }
         if (isset($params['excerpt'])) {
-            wp_update_post(array(
+            $update = array(
                 'ID' => $post_id,
                 'post_excerpt' => sanitize_textarea_field($params['excerpt']),
-            ));
+            );
+            if ($preserve) {
+                $update['post_date'] = $saved_date;
+                $update['post_date_gmt'] = $saved_date_gmt;
+                $update['post_name'] = $saved_name;
+                $update['post_author'] = $saved_author;
+                $update['edit_date'] = true;
+            }
+            wp_update_post($update);
             $updated_keys[] = 'excerpt';
         }
-        if (!empty($params['status']) && in_array($params['status'], array('draft', 'publish', 'private', 'pending'), true)) {
+        if (!$preserve && !empty($params['status']) && in_array($params['status'], array('draft', 'publish', 'private', 'pending'), true)) {
             wp_update_post(array(
                 'ID' => $post_id,
                 'post_status' => $params['status'],
@@ -716,8 +779,14 @@ class Vernal_API {
             $updated_keys[] = 'status';
         }
         if (!empty($params['powerpress']) && is_array($params['powerpress'])) {
-            $this->set_powerpress_enclosure($post_id, $params['powerpress']);
-            $updated_keys[] = 'powerpress';
+            $incoming_url = isset($params['powerpress']['media_url']) ? trim((string) $params['powerpress']['media_url']) : '';
+            $has_valid_existing = $existing_enclosure && !empty($existing_enclosure['media_url']);
+            if ($preserve && $has_valid_existing) {
+                // Hard invariant: do not replace a valid legacy enclosure on retrofit.
+            } elseif ($incoming_url !== '') {
+                $this->set_powerpress_enclosure($post_id, $params['powerpress']);
+                $updated_keys[] = 'powerpress';
+            }
         }
         if (!empty($params['category_ids']) && is_array($params['category_ids'])) {
             $category_ids = array_values(array_filter(array_map('intval', $params['category_ids'])));
@@ -732,6 +801,18 @@ class Vernal_API {
                 $updated_keys[] = 'category_id';
             }
         }
+        if (!empty($params['meta']) && is_array($params['meta'])) {
+            foreach ($params['meta'] as $meta_key => $meta_val) {
+                if (!is_string($meta_key) || $meta_key === '') {
+                    continue;
+                }
+                if (in_array($meta_key, array('post_date', 'post_date_gmt', 'post_name', 'post_author'), true)) {
+                    continue;
+                }
+                $this->set_post_meta_value($post_id, $meta_key, $meta_val);
+                $updated_keys[] = 'meta:' . $meta_key;
+            }
+        }
         $verified = array();
         if (!empty($params['acf']) && is_array($params['acf'])) {
             $this->apply_acf_fields($post_id, $params['acf'], 0);
@@ -742,11 +823,35 @@ class Vernal_API {
                 }
                 $verified[$acf_key] = $this->read_acf_or_meta($post_id, $acf_key);
             }
-            // Always surface guest name + shirt galleries for ops debugging
             foreach (array('ih_guests_name', 'ih_guest_name', 'shirt_prints', 'shirt_prints_back', 'shirt_front', 'shirt_back') as $probe) {
                 if (!array_key_exists($probe, $verified)) {
                     $verified[$probe] = $this->read_acf_or_meta($post_id, $probe);
                 }
+            }
+        }
+
+        if ($preserve) {
+            $fresh = get_post($post_id);
+            if ($fresh && (
+                $fresh->post_date !== $saved_date
+                || $fresh->post_date_gmt !== $saved_date_gmt
+                || $fresh->post_name !== $saved_name
+                || intval($fresh->post_author) !== $saved_author
+            )) {
+                global $wpdb;
+                $wpdb->update(
+                    $wpdb->posts,
+                    array(
+                        'post_date' => $saved_date,
+                        'post_date_gmt' => $saved_date_gmt,
+                        'post_name' => $saved_name,
+                        'post_author' => $saved_author,
+                    ),
+                    array('ID' => $post_id),
+                    array('%s', '%s', '%s', '%d'),
+                    array('%d')
+                );
+                clean_post_cache($post_id);
             }
         }
 
@@ -757,8 +862,250 @@ class Vernal_API {
                 'url' => get_permalink($post_id),
                 'updated_keys' => array_values(array_unique($updated_keys)),
                 'verified_acf' => $verified,
+                'preserve_publication' => $preserve,
+                'post_date' => get_post_field('post_date', $post_id),
+                'slug' => get_post_field('post_name', $post_id),
             ),
         ));
+    }
+
+    /**
+     * List show landing posts (Shows category and/or podcast heuristics).
+     */
+    public function list_shows($request) {
+        $page = max(1, intval($request->get_param('page') ?: 1));
+        $per_page = min(100, max(1, intval($request->get_param('per_page') ?: 50)));
+        $category = $request->get_param('category');
+        $category_id = intval($request->get_param('category_id') ?: 0);
+
+        $args = array(
+            'post_type' => 'post',
+            'post_status' => array('publish', 'draft', 'private', 'pending'),
+            'posts_per_page' => $per_page,
+            'paged' => $page,
+            'orderby' => 'date',
+            'order' => 'DESC',
+            'suppress_filters' => true,
+        );
+
+        if ($category_id > 0) {
+            $args['cat'] = $category_id;
+        } elseif (!empty($category)) {
+            $term = get_category_by_slug(sanitize_title($category));
+            if (!$term) {
+                $term = get_term_by('name', sanitize_text_field($category), 'category');
+            }
+            if ($term && !is_wp_error($term)) {
+                $args['cat'] = intval($term->term_id);
+            }
+        }
+
+        if (empty($args['cat'])) {
+            $args['meta_query'] = array(
+                'relation' => 'OR',
+                array('key' => 'vernal_episode_id', 'compare' => 'EXISTS'),
+                array('key' => 'enclosure', 'compare' => 'EXISTS'),
+                array('key' => '_podcast:mediaurl', 'compare' => 'EXISTS'),
+                array('key' => 'ih_guests_name', 'compare' => 'EXISTS'),
+                array('key' => 'ih_show_summary', 'compare' => 'EXISTS'),
+            );
+        }
+
+        $q = new WP_Query($args);
+        $items = array();
+        foreach ($q->posts as $post) {
+            $items[] = $this->format_show_list_item($post);
+        }
+
+        return rest_ensure_response(array(
+            'success' => true,
+            'data' => $items,
+            'count' => count($items),
+            'total' => intval($q->found_posts),
+            'page' => $page,
+            'per_page' => $per_page,
+        ));
+    }
+
+    /**
+     * Full show landing snapshot for Machine diagnose / reconcile / verify.
+     */
+    public function get_show($request) {
+        $post_id = intval($request['id']);
+        $post = get_post($post_id);
+        if (!$post || $post->post_type !== 'post') {
+            return new WP_Error(
+                'not_found',
+                __('Show post not found', 'vernal-contentum'),
+                array('status' => 404)
+            );
+        }
+        return rest_ensure_response(array(
+            'success' => true,
+            'data' => $this->format_show_snapshot($post),
+        ));
+    }
+
+    /**
+     * Patch retrofit meta (show_number / OCR advisory) without touching publication fields.
+     */
+    public function update_show_meta($request) {
+        $post_id = intval($request['id']);
+        $post = get_post($post_id);
+        if (!$post || $post->post_type !== 'post') {
+            return new WP_Error(
+                'not_found',
+                __('Show post not found', 'vernal-contentum'),
+                array('status' => 404)
+            );
+        }
+        $params = $request->get_json_params();
+        if (!is_array($params)) {
+            $params = array();
+        }
+        $allowed = array(
+            'show_number',
+            'vernal_episode_id',
+            '_vernal_ocr_show_number',
+            '_vernal_ocr_show_number_advisory',
+            '_vernal_ocr_show_number_raw',
+        );
+        $updated = array();
+        foreach ($allowed as $key) {
+            if (!array_key_exists($key, $params)) {
+                continue;
+            }
+            $val = $params[$key];
+            if ($val === null || $val === '') {
+                delete_post_meta($post_id, $key);
+            } else {
+                update_post_meta($post_id, $key, is_scalar($val) ? sanitize_text_field((string) $val) : $val);
+            }
+            $updated[$key] = get_post_meta($post_id, $key, true);
+        }
+        return rest_ensure_response(array(
+            'success' => true,
+            'data' => array(
+                'id' => $post_id,
+                'meta' => $updated,
+            ),
+        ));
+    }
+
+    private function format_show_list_item($post) {
+        $post_id = intval($post->ID);
+        $enclosure = $this->read_powerpress_enclosure($post_id);
+        $thumb_id = get_post_thumbnail_id($post_id);
+        return array(
+            'id' => $post_id,
+            'title' => get_the_title($post_id),
+            'status' => $post->post_status,
+            'slug' => $post->post_name,
+            'url' => get_permalink($post_id),
+            'edit_url' => get_edit_post_link($post_id, 'raw'),
+            'post_date' => $post->post_date,
+            'post_modified' => $post->post_modified,
+            'author_id' => intval($post->post_author),
+            'guest_name' => $this->read_acf_or_meta($post_id, 'ih_guests_name'),
+            'show_number' => get_post_meta($post_id, 'show_number', true) ?: null,
+            'ocr_show_number' => get_post_meta($post_id, '_vernal_ocr_show_number', true) ?: null,
+            'vernal_episode_id' => get_post_meta($post_id, 'vernal_episode_id', true) ?: null,
+            'has_enclosure' => !empty($enclosure['media_url']),
+            'media_url' => $enclosure ? $enclosure['media_url'] : null,
+            'category_ids' => array_map('intval', wp_get_post_categories($post_id)),
+            'featured_image_id' => $thumb_id ? intval($thumb_id) : null,
+            'featured_image_url' => $thumb_id ? wp_get_attachment_url($thumb_id) : get_the_post_thumbnail_url($post_id, 'full'),
+        );
+    }
+
+    private function format_show_snapshot($post) {
+        $post_id = intval($post->ID);
+        $acf_keys = array(
+            'ih_guests_name', 'ih_guest_name', 'ih_personal_website', 'ih_podcast',
+            'ih_misc_link', 'ih_their_offer', 'ih_amazon', 'ih_instagram', 'ih_youtube',
+            'ih_facebook', 'ih_linkedin', 'ih_youtube_link', 'ih_show_summary',
+            'ih_transcript', 'ih_guest_headshot', 'ih_guest_bio', 'shirt_prints',
+            'shirt_prints_json', 'shirt_prints_back', 'shirt_prints_back_json',
+            'shirt_front', 'shirt_back', 'thumbnail',
+        );
+        $acf = array();
+        foreach ($acf_keys as $key) {
+            $acf[$key] = $this->normalize_acf_image_value($this->read_acf_or_meta($post_id, $key));
+        }
+        $code_fields = array();
+        if (class_exists('Vernal_Code_Fields')) {
+            $code_fields = Vernal_Code_Fields::get_code_fields($post_id);
+        }
+        $thumb_id = get_post_thumbnail_id($post_id);
+        $list = $this->format_show_list_item($post);
+        return array_merge($list, array(
+            'excerpt' => $post->post_excerpt,
+            'content' => $post->post_content,
+            'post_date_gmt' => $post->post_date_gmt,
+            'post_modified_gmt' => $post->post_modified_gmt,
+            'powerpress' => $this->read_powerpress_enclosure($post_id),
+            'acf' => $acf,
+            'code_fields' => $code_fields,
+            'meta' => array(
+                'vernal_episode_id' => get_post_meta($post_id, 'vernal_episode_id', true) ?: null,
+                'show_number' => get_post_meta($post_id, 'show_number', true) ?: null,
+                '_vernal_ocr_show_number' => get_post_meta($post_id, '_vernal_ocr_show_number', true) ?: null,
+                '_vernal_ocr_show_number_advisory' => get_post_meta($post_id, '_vernal_ocr_show_number_advisory', true) ?: null,
+                '_vernal_ocr_show_number_raw' => get_post_meta($post_id, '_vernal_ocr_show_number_raw', true) ?: null,
+            ),
+            'featured_image_id' => $thumb_id ? intval($thumb_id) : null,
+            'featured_image_url' => $list['featured_image_url'],
+            'featured_image_file' => $thumb_id ? get_attached_file($thumb_id) : null,
+        ));
+    }
+
+    private function normalize_acf_image_value($val) {
+        if (is_numeric($val) && intval($val) > 0) {
+            $url = wp_get_attachment_url(intval($val));
+            return array('id' => intval($val), 'url' => $url ?: null);
+        }
+        if (is_array($val)) {
+            if (!empty($val['url'])) {
+                return $val;
+            }
+            if (!empty($val['ID'])) {
+                $url = wp_get_attachment_url(intval($val['ID']));
+                $val['url'] = $url ?: null;
+            }
+        }
+        return $val;
+    }
+
+    /**
+     * Read PowerPress enclosure / media URL meta.
+     *
+     * @return array{media_url:string,length:int,type:string}|null
+     */
+    private function read_powerpress_enclosure($post_id) {
+        $enc = get_post_meta($post_id, 'enclosure', true);
+        $media_url = get_post_meta($post_id, '_podcast:mediaurl', true);
+        $length = 0;
+        $type = 'audio/mpeg';
+        if (is_string($enc) && $enc !== '') {
+            $parts = preg_split("/\r\n|\n|\r/", $enc);
+            if (!empty($parts[0])) {
+                $media_url = $media_url ?: trim($parts[0]);
+            }
+            if (!empty($parts[1])) {
+                $length = intval($parts[1]);
+            }
+            if (!empty($parts[2])) {
+                $type = trim($parts[2]);
+            }
+        }
+        if (!$media_url) {
+            return null;
+        }
+        return array(
+            'media_url' => $media_url,
+            'length' => $length,
+            'type' => $type !== '' ? $type : 'audio/mpeg',
+        );
     }
 
     /**
