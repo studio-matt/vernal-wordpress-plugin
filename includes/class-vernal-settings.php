@@ -518,111 +518,197 @@ class Vernal_Settings {
         $settings = get_option('vernal_contentum_settings', array());
         $backend_url = defined('VERNAL_BACKEND_URL') ? VERNAL_BACKEND_URL : (isset($settings['backend_url']) ? $settings['backend_url'] : '');
         $backend_api_key = defined('VERNAL_BACKEND_API_KEY') ? VERNAL_BACKEND_API_KEY : (isset($settings['backend_api_key']) ? $settings['backend_api_key'] : '');
-        $destination_id = isset($_GET['destination_id']) ? intval($_GET['destination_id']) : intval(get_option('vernal_contentum_retrofit_destination_id', 0));
-        $category_slug = isset($_GET['category']) ? sanitize_title($_GET['category']) : 'shows';
+        $category_slug = isset($_REQUEST['category']) ? sanitize_title(wp_unslash($_REQUEST['category'])) : 'shows';
+        $paged = max(1, isset($_GET['paged']) ? intval($_GET['paged']) : 1);
+        $per_page = 25;
         $notice = '';
         $notice_type = 'info';
 
-        // Handle actions from this page (POST).
-        if (!empty($_POST['vernal_retrofit_action']) && check_admin_referer('vernal_show_retrofit')) {
-            $action = sanitize_text_field($_POST['vernal_retrofit_action']);
-            $wp_post_id = isset($_POST['wp_post_id']) ? intval($_POST['wp_post_id']) : 0;
-            $destination_id = isset($_POST['destination_id']) ? intval($_POST['destination_id']) : $destination_id;
-            if ($destination_id > 0) {
-                update_option('vernal_contentum_retrofit_destination_id', $destination_id, false);
-            }
-            $payload = array(
-                'destination_id' => $destination_id,
-                'wp_post_id' => $wp_post_id,
-            );
-            $path = '';
-            if ($action === 'discover' && $wp_post_id && $destination_id) {
-                $path = 'podcasts/retrofit/discover';
-            } elseif ($action === 'ocr' && $wp_post_id && $destination_id) {
-                $path = 'podcasts/retrofit/ocr';
-            } elseif ($action === 'confirm' && $wp_post_id && $destination_id) {
-                $path = 'podcasts/retrofit/confirm';
-                $payload['show_number'] = intval($_POST['show_number'] ?? 0);
-                $payload['force'] = !empty($_POST['force']);
-            } elseif ($action === 'dry_run' && $wp_post_id && $destination_id) {
-                $path = 'podcasts/retrofit/reconcile';
-                $payload['dry_run'] = true;
-            } elseif ($action === 'reformat' && $wp_post_id && $destination_id) {
-                $path = 'podcasts/retrofit/reconcile';
-                $payload['dry_run'] = false;
-            } elseif ($action === 'queue' && !empty($_POST['retrofit_id'])) {
-                $path = 'podcasts/retrofit/queue';
-                $payload = array('retrofit_id' => intval($_POST['retrofit_id']));
-            } elseif ($action === 'save_destination') {
-                $notice = __('Destination ID saved.', 'vernal-contentum');
-            }
+        $destinations = array();
+        $policy = array();
+        $quota = array();
+        $destination_id = isset($_REQUEST['destination_id']) ? intval($_REQUEST['destination_id']) : intval(get_option('vernal_contentum_retrofit_destination_id', 0));
 
-            if ($path && $backend_url && $backend_api_key) {
-                $api_url = trailingslashit($backend_url) . ltrim($path, '/');
-                $response = wp_remote_post($api_url, array(
-                    'headers' => array(
-                        'X-API-Key' => $backend_api_key,
-                        'Content-Type' => 'application/json',
-                    ),
-                    'timeout' => 180,
-                    'body' => wp_json_encode($payload),
-                ));
-                if (is_wp_error($response)) {
-                    $notice = $response->get_error_message();
-                    $notice_type = 'error';
-                } else {
-                    $code = wp_remote_retrieve_response_code($response);
-                    $body = json_decode(wp_remote_retrieve_body($response), true);
-                    if ($code >= 200 && $code < 300) {
-                        $notice = sprintf(
-                            /* translators: 1: action name 2: status */
-                            __('Action %1$s completed (%2$s).', 'vernal-contentum'),
-                            esc_html($action),
-                            esc_html(isset($body['status']) ? $body['status'] : 'ok')
-                        );
-                        $notice_type = 'success';
-                        if (!empty($body['error'])) {
-                            $notice .= ' ' . esc_html(is_string($body['error']) ? $body['error'] : wp_json_encode($body['error']));
-                            $notice_type = 'warning';
-                        }
-                    } else {
-                        $notice = sprintf(__('Backend returned HTTP %d', 'vernal-contentum'), $code);
-                        if (is_array($body)) {
-                            $notice .= ': ' . esc_html(wp_json_encode($body));
-                        }
-                        $notice_type = 'error';
+        // Bootstrap: auto-resolve WordPress destination from this site's URL.
+        if (!empty($backend_url) && !empty($backend_api_key)) {
+            $boot_url = trailingslashit($backend_url) . 'podcasts/retrofit/bootstrap?site_url=' . rawurlencode(home_url('/'));
+            $boot_resp = wp_remote_get($boot_url, array(
+                'headers' => array('X-API-Key' => $backend_api_key),
+                'timeout' => 30,
+            ));
+            if (!is_wp_error($boot_resp) && wp_remote_retrieve_response_code($boot_resp) === 200) {
+                $boot = json_decode(wp_remote_retrieve_body($boot_resp), true);
+                if (is_array($boot)) {
+                    $destinations = isset($boot['destinations']) && is_array($boot['destinations']) ? $boot['destinations'] : array();
+                    $policy = isset($boot['policy']) && is_array($boot['policy']) ? $boot['policy'] : array();
+                    $quota = isset($boot['quota_usage']) && is_array($boot['quota_usage']) ? $boot['quota_usage'] : array();
+                    if ($destination_id <= 0 && !empty($boot['resolved_destination_id'])) {
+                        $destination_id = intval($boot['resolved_destination_id']);
+                        update_option('vernal_contentum_retrofit_destination_id', $destination_id, false);
                     }
                 }
-            } elseif ($path) {
-                $notice = __('Backend URL and API key required.', 'vernal-contentum');
-                $notice_type = 'error';
+            } else {
+                $notice = __('Could not reach Machine bootstrap (check Connection API key).', 'vernal-contentum');
+                $notice_type = 'warning';
+                if (is_wp_error($boot_resp)) {
+                    $notice .= ' ' . $boot_resp->get_error_message();
+                }
             }
         }
 
-        // Local list for UX (Machine still re-fetches via GET /shows/{id} on reconcile).
+        $machine_call = function ($method, $path, $payload = null) use ($backend_url, $backend_api_key) {
+            if (empty($backend_url) || empty($backend_api_key)) {
+                return array('ok' => false, 'error' => 'Backend URL and API key required.');
+            }
+            $api_url = trailingslashit($backend_url) . ltrim($path, '/');
+            $args = array(
+                'method' => strtoupper($method),
+                'headers' => array(
+                    'X-API-Key' => $backend_api_key,
+                    'Content-Type' => 'application/json',
+                ),
+                'timeout' => 180,
+            );
+            if ($payload !== null) {
+                $args['body'] = wp_json_encode($payload);
+            }
+            $response = wp_remote_request($api_url, $args);
+            if (is_wp_error($response)) {
+                return array('ok' => false, 'error' => $response->get_error_message());
+            }
+            $code = wp_remote_retrieve_response_code($response);
+            $body = json_decode(wp_remote_retrieve_body($response), true);
+            return array(
+                'ok' => ($code >= 200 && $code < 300),
+                'code' => $code,
+                'body' => $body,
+            );
+        };
+
+        if (!empty($_POST['vernal_retrofit_action']) && check_admin_referer('vernal_show_retrofit')) {
+            $action = sanitize_text_field(wp_unslash($_POST['vernal_retrofit_action']));
+            $wp_post_id = isset($_POST['wp_post_id']) ? intval($_POST['wp_post_id']) : 0;
+            if (isset($_POST['destination_id'])) {
+                $destination_id = intval($_POST['destination_id']);
+            }
+            if ($destination_id > 0) {
+                update_option('vernal_contentum_retrofit_destination_id', $destination_id, false);
+            }
+
+            $result = null;
+            if ($action === 'save_policy') {
+                $payload = array(
+                    'enabled' => !empty($_POST['policy_enabled']),
+                    'weekly_limit' => max(0, intval($_POST['weekly_limit'] ?? 5)),
+                    'daily_limit' => max(0, intval($_POST['daily_limit'] ?? 1)),
+                    'article_publish_mode' => sanitize_text_field(wp_unslash($_POST['article_publish_mode'] ?? 'draft')),
+                    'order' => sanitize_text_field(wp_unslash($_POST['order'] ?? 'show_number_desc')),
+                    'shows_category' => sanitize_title(wp_unslash($_POST['category'] ?? $category_slug)),
+                );
+                $result = $machine_call('PUT', 'podcasts/retrofit/policy', $payload);
+                if ($result['ok'] && !empty($result['body']['policy'])) {
+                    $policy = $result['body']['policy'];
+                }
+            } elseif ($action === 'run_tick') {
+                $result = $machine_call('POST', 'podcasts/retrofit/run-quota-tick?limit=1', new stdClass());
+            } elseif ($action === 'discover_page' && $destination_id > 0) {
+                $result = $machine_call('POST', 'podcasts/retrofit/discover-batch', array(
+                    'destination_id' => $destination_id,
+                    'category' => $category_slug,
+                    'page' => $paged,
+                    'per_page' => $per_page,
+                    'diagnose' => true,
+                ));
+            } elseif ($action === 'discover' && $wp_post_id && $destination_id) {
+                $result = $machine_call('POST', 'podcasts/retrofit/discover', array(
+                    'destination_id' => $destination_id,
+                    'wp_post_id' => $wp_post_id,
+                ));
+            } elseif ($action === 'ocr' && $wp_post_id && $destination_id) {
+                $result = $machine_call('POST', 'podcasts/retrofit/ocr', array(
+                    'destination_id' => $destination_id,
+                    'wp_post_id' => $wp_post_id,
+                ));
+            } elseif ($action === 'confirm' && $wp_post_id && $destination_id) {
+                $result = $machine_call('POST', 'podcasts/retrofit/confirm', array(
+                    'destination_id' => $destination_id,
+                    'wp_post_id' => $wp_post_id,
+                    'show_number' => intval($_POST['show_number'] ?? 0),
+                    'force' => !empty($_POST['force']),
+                ));
+            } elseif ($action === 'dry_run' && $wp_post_id && $destination_id) {
+                $result = $machine_call('POST', 'podcasts/retrofit/reconcile', array(
+                    'destination_id' => $destination_id,
+                    'wp_post_id' => $wp_post_id,
+                    'dry_run' => true,
+                ));
+            } elseif ($action === 'reformat' && $wp_post_id && $destination_id) {
+                $result = $machine_call('POST', 'podcasts/retrofit/reconcile', array(
+                    'destination_id' => $destination_id,
+                    'wp_post_id' => $wp_post_id,
+                    'dry_run' => false,
+                ));
+            } elseif ($action === 'queue' && !empty($_POST['retrofit_id'])) {
+                $result = $machine_call('POST', 'podcasts/retrofit/queue', array(
+                    'retrofit_id' => intval($_POST['retrofit_id']),
+                ));
+            } elseif ($action === 'ongoing' && !empty($_POST['episode_id'])) {
+                $result = $machine_call('POST', 'podcasts/retrofit/ongoing-content', array(
+                    'episode_id' => sanitize_text_field(wp_unslash($_POST['episode_id'])),
+                    'enabled' => !empty($_POST['ongoing_enabled']),
+                ));
+            } elseif ($action === 'save_destination') {
+                $notice = __('Destination saved.', 'vernal-contentum');
+                $notice_type = 'success';
+            }
+
+            if ($result !== null) {
+                if (!empty($result['ok'])) {
+                    $notice = sprintf(__('Action “%s” completed.', 'vernal-contentum'), $action);
+                    $notice_type = 'success';
+                    if (!empty($result['body']['error'])) {
+                        $notice .= ' ' . (is_string($result['body']['error']) ? $result['body']['error'] : wp_json_encode($result['body']['error']));
+                        $notice_type = 'warning';
+                    }
+                    if ($action === 'dry_run' && !empty($result['body']['planned'])) {
+                        $notice .= ' Planned: ' . esc_html(implode(', ', (array) $result['body']['planned']));
+                    }
+                } else {
+                    $notice = isset($result['error']) ? $result['error'] : sprintf(__('Backend HTTP %d', 'vernal-contentum'), intval($result['code'] ?? 0));
+                    if (!empty($result['body'])) {
+                        $notice .= ': ' . wp_json_encode($result['body']);
+                    }
+                    $notice_type = 'error';
+                }
+            }
+        }
+
         $cat = get_category_by_slug($category_slug);
-        $args = array(
+        $query_args = array(
             'post_type' => 'post',
             'post_status' => array('publish', 'draft', 'private', 'pending'),
-            'posts_per_page' => 50,
+            'posts_per_page' => $per_page,
+            'paged' => $paged,
             'orderby' => 'date',
             'order' => 'DESC',
         );
         if ($cat && !is_wp_error($cat)) {
-            $args['cat'] = intval($cat->term_id);
+            $query_args['cat'] = intval($cat->term_id);
         }
-        $posts = get_posts($args);
+        $q = new WP_Query($query_args);
+        $posts = $q->posts;
+        $total = intval($q->found_posts);
+        $total_pages = max(1, intval($q->max_num_pages));
 
-        // Machine rows for status overlay
         $machine_rows = array();
-        if ($backend_url && $backend_api_key) {
-            $rows_url = trailingslashit($backend_url) . 'podcasts/retrofit/rows?limit=200';
+        if (!empty($backend_url) && !empty($backend_api_key)) {
+            $rows_url = trailingslashit($backend_url) . 'podcasts/retrofit/rows?limit=500';
             if ($destination_id > 0) {
                 $rows_url .= '&destination_id=' . intval($destination_id);
             }
             $resp = wp_remote_get($rows_url, array(
                 'headers' => array('X-API-Key' => $backend_api_key),
-                'timeout' => 30,
+                'timeout' => 45,
             ));
             if (!is_wp_error($resp) && wp_remote_retrieve_response_code($resp) === 200) {
                 $data = json_decode(wp_remote_retrieve_body($resp), true);
@@ -636,41 +722,164 @@ class Vernal_Settings {
             }
         }
 
+        $policy_enabled = !empty($policy['enabled']);
+        $article_mode = isset($policy['article_publish_mode']) ? $policy['article_publish_mode'] : 'draft';
+        $weekly_limit = isset($policy['weekly_limit']) ? intval($policy['weekly_limit']) : 5;
+        $daily_limit = isset($policy['daily_limit']) ? intval($policy['daily_limit']) : 1;
+        $order = isset($policy['order']) ? $policy['order'] : 'show_number_desc';
+
         ?>
         <div class="wrap">
             <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
-            <p><?php _e('Temporary ops UI for aligning legacy show landings. Machine owns diagnose/reconcile; this page renders facets and actions.', 'vernal-contentum'); ?></p>
+            <p><?php _e('Align legacy show landings with Vernal. Bill Quateman / show #268 (already published through Vernal) is a reference row — retrofit targets older episodes that still need numbers, ACF, and the 3 related articles.', 'vernal-contentum'); ?></p>
 
             <?php if ($notice): ?>
                 <div class="notice notice-<?php echo esc_attr($notice_type); ?>"><p><?php echo esc_html($notice); ?></p></div>
             <?php endif; ?>
 
             <?php if (empty($backend_url) || empty($backend_api_key)): ?>
-                <div class="notice notice-warning">
-                    <p><?php _e('Configure Backend API URL and API Key under Connection to enable Machine actions.', 'vernal-contentum'); ?></p>
+                <div class="notice notice-error">
+                    <p><?php _e('Configure Backend API URL and API Key under Connection first.', 'vernal-contentum'); ?></p>
                 </div>
             <?php endif; ?>
 
-            <form method="get" style="margin: 12px 0;">
-                <input type="hidden" name="page" value="vernal-contentum-show-retrofit" />
-                <label>
-                    <?php _e('Machine destination_id', 'vernal-contentum'); ?>
-                    <input type="number" name="destination_id" value="<?php echo esc_attr($destination_id); ?>" min="1" style="width:100px;" />
-                </label>
-                <label style="margin-left:12px;">
-                    <?php _e('Category slug', 'vernal-contentum'); ?>
-                    <input type="text" name="category" value="<?php echo esc_attr($category_slug); ?>" style="width:120px;" />
-                </label>
-                <?php submit_button(__('Refresh', 'vernal-contentum'), 'secondary', '', false); ?>
-            </form>
+            <div style="background:#fff;border:1px solid #c3c4c7;padding:16px;margin:16px 0;">
+                <h2 style="margin-top:0;"><?php _e('Connection &amp; schedule', 'vernal-contentum'); ?></h2>
+                <form method="post" style="margin-bottom:12px;">
+                    <?php wp_nonce_field('vernal_show_retrofit'); ?>
+                    <input type="hidden" name="vernal_retrofit_action" value="save_destination" />
+                    <label>
+                        <strong><?php _e('WordPress destination', 'vernal-contentum'); ?></strong><br />
+                        <select name="destination_id" style="min-width:320px;">
+                            <option value="0"><?php _e('— select —', 'vernal-contentum'); ?></option>
+                            <?php foreach ($destinations as $d):
+                                $did = intval($d['id'] ?? 0);
+                                $label = ($d['destination_name'] ?? ('#' . $did));
+                                if (!empty($d['site_url'])) {
+                                    $label .= ' — ' . $d['site_url'];
+                                }
+                                if (!empty($d['is_default'])) {
+                                    $label .= ' (default)';
+                                }
+                                ?>
+                                <option value="<?php echo esc_attr($did); ?>" <?php selected($destination_id, $did); ?>>
+                                    <?php echo esc_html($label); ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                    <label style="margin-left:12px;">
+                        <?php _e('Category slug', 'vernal-contentum'); ?>
+                        <input type="text" name="category" value="<?php echo esc_attr($category_slug); ?>" style="width:120px;" />
+                    </label>
+                    <?php submit_button(__('Save destination', 'vernal-contentum'), 'secondary', '', false); ?>
+                </form>
 
-            <form method="post" style="display:inline;">
-                <?php wp_nonce_field('vernal_show_retrofit'); ?>
-                <input type="hidden" name="vernal_retrofit_action" value="save_destination" />
-                <input type="hidden" name="destination_id" value="<?php echo esc_attr($destination_id); ?>" />
-            </form>
+                <?php if ($destination_id <= 0): ?>
+                    <div class="notice notice-warning inline"><p>
+                        <?php if (empty($destinations)): ?>
+                            <?php _e('No WordPress destinations found on Machine for this API key. Connect this site in Machine Account Settings → Connections.', 'vernal-contentum'); ?>
+                        <?php else: ?>
+                            <?php _e('Select the WordPress destination above, then Save — action buttons will appear.', 'vernal-contentum'); ?>
+                        <?php endif; ?>
+                    </p></div>
+                <?php else: ?>
+                    <p><strong><?php _e('Active destination_id:', 'vernal-contentum'); ?></strong> <code><?php echo esc_html((string) $destination_id); ?></code></p>
+                <?php endif; ?>
 
-            <table class="widefat striped" style="margin-top:16px;">
+                <form method="post" style="border-top:1px solid #eee;padding-top:12px;margin-top:8px;">
+                    <?php wp_nonce_field('vernal_show_retrofit'); ?>
+                    <input type="hidden" name="vernal_retrofit_action" value="save_policy" />
+                    <input type="hidden" name="destination_id" value="<?php echo esc_attr($destination_id); ?>" />
+                    <input type="hidden" name="category" value="<?php echo esc_attr($category_slug); ?>" />
+                    <p>
+                        <label>
+                            <input type="checkbox" name="policy_enabled" value="1" <?php checked($policy_enabled); ?> />
+                            <?php _e('Scheduler enabled (kill switch — uncheck to pause claiming queued shows)', 'vernal-contentum'); ?>
+                        </label>
+                    </p>
+                    <p>
+                        <label><?php _e('Weekly limit', 'vernal-contentum'); ?>
+                            <input type="number" name="weekly_limit" value="<?php echo esc_attr($weekly_limit); ?>" min="0" style="width:70px;" />
+                        </label>
+                        <label style="margin-left:12px;"><?php _e('Daily limit', 'vernal-contentum'); ?>
+                            <input type="number" name="daily_limit" value="<?php echo esc_attr($daily_limit); ?>" min="0" style="width:70px;" />
+                        </label>
+                        <label style="margin-left:12px;"><?php _e('Article mode', 'vernal-contentum'); ?>
+                            <select name="article_publish_mode">
+                                <option value="draft" <?php selected($article_mode, 'draft'); ?>><?php _e('draft (first cohort)', 'vernal-contentum'); ?></option>
+                                <option value="publish" <?php selected($article_mode, 'publish'); ?>><?php _e('publish', 'vernal-contentum'); ?></option>
+                            </select>
+                        </label>
+                        <label style="margin-left:12px;"><?php _e('Order', 'vernal-contentum'); ?>
+                            <select name="order">
+                                <option value="show_number_desc" <?php selected($order, 'show_number_desc'); ?>><?php _e('newest # first', 'vernal-contentum'); ?></option>
+                                <option value="show_number_asc" <?php selected($order, 'show_number_asc'); ?>><?php _e('oldest # first', 'vernal-contentum'); ?></option>
+                            </select>
+                        </label>
+                    </p>
+                    <p style="color:#555;">
+                        <?php
+                        printf(
+                            /* translators: 1: week completed 2: day completed */
+                            __('Quota this week: %1$d completed/claimed · today: %2$d', 'vernal-contentum'),
+                            intval($quota['week_completed_or_claimed'] ?? 0),
+                            intval($quota['day_completed_or_claimed'] ?? 0)
+                        );
+                        ?>
+                    </p>
+                    <?php submit_button(__('Save schedule settings', 'vernal-contentum'), 'primary', '', false); ?>
+                </form>
+
+                <?php if ($destination_id > 0): ?>
+                <form method="post" style="display:inline-block;margin-top:8px;margin-right:8px;">
+                    <?php wp_nonce_field('vernal_show_retrofit'); ?>
+                    <input type="hidden" name="destination_id" value="<?php echo esc_attr($destination_id); ?>" />
+                    <input type="hidden" name="vernal_retrofit_action" value="discover_page" />
+                    <?php submit_button(__('Diagnose this page', 'vernal-contentum'), 'secondary', '', false); ?>
+                </form>
+                <form method="post" style="display:inline-block;margin-top:8px;">
+                    <?php wp_nonce_field('vernal_show_retrofit'); ?>
+                    <input type="hidden" name="destination_id" value="<?php echo esc_attr($destination_id); ?>" />
+                    <input type="hidden" name="vernal_retrofit_action" value="run_tick" />
+                    <?php submit_button(__('Process 1 queued show now', 'vernal-contentum'), 'secondary', '', false); ?>
+                </form>
+                <?php endif; ?>
+            </div>
+
+            <p>
+                <?php
+                printf(
+                    /* translators: 1: total 2: page 3: pages */
+                    __('Showing %1$d shows · page %2$d of %3$d', 'vernal-contentum'),
+                    $total,
+                    $paged,
+                    $total_pages
+                );
+                ?>
+            </p>
+
+            <?php
+            $base = admin_url('admin.php?page=vernal-contentum-show-retrofit');
+            $base = add_query_arg(array(
+                'destination_id' => $destination_id,
+                'category' => $category_slug,
+            ), $base);
+            if ($total_pages > 1) {
+                echo '<div class="tablenav top"><div class="tablenav-pages">';
+                echo paginate_links(array(
+                    'base' => add_query_arg('paged', '%#%', $base),
+                    'format' => '',
+                    'current' => $paged,
+                    'total' => $total_pages,
+                    'prev_text' => '&laquo;',
+                    'next_text' => '&raquo;',
+                ));
+                echo '</div></div>';
+            }
+            ?>
+
+            <table class="widefat striped" style="margin-top:8px;">
                 <thead>
                     <tr>
                         <th><?php _e('Thumb', 'vernal-contentum'); ?></th>
@@ -690,17 +899,26 @@ class Vernal_Settings {
                         $thumb = get_the_post_thumbnail_url($pid, 'thumbnail');
                         $show_number = get_post_meta($pid, 'show_number', true);
                         $ocr = get_post_meta($pid, '_vernal_ocr_show_number', true);
+                        $vernal_eid = get_post_meta($pid, 'vernal_episode_id', true);
                         $row = isset($machine_rows[$pid]) ? $machine_rows[$pid] : null;
                         $diag = $row && !empty($row['diagnostic']) ? $row['diagnostic'] : null;
+                        $is_ref_268 = (strval($show_number) === '268');
+                        $episode_id = $row['podcast_episode_id'] ?? ($vernal_eid ?: '');
                         ?>
-                        <tr>
+                        <tr<?php echo $is_ref_268 ? ' style="background:#f0f6fc;"' : ''; ?>>
                             <td><?php if ($thumb): ?><img src="<?php echo esc_url($thumb); ?>" width="48" height="48" alt="" /><?php endif; ?></td>
                             <td>
-                                <strong><a href="<?php echo esc_url(get_edit_post_link($pid)); ?>"><?php echo esc_html(get_the_title($pid)); ?></a></strong><br />
+                                <strong><a href="<?php echo esc_url(get_edit_post_link($pid)); ?>"><?php echo esc_html(get_the_title($pid)); ?></a></strong>
+                                <?php if ($is_ref_268): ?>
+                                    <span style="margin-left:6px;padding:2px 6px;background:#2271b1;color:#fff;border-radius:3px;font-size:11px;"><?php _e('Vernal reference (268)', 'vernal-contentum'); ?></span>
+                                <?php endif; ?>
+                                <br />
                                 <code>#<?php echo esc_html((string) $pid); ?></code>
                                 <?php if (!empty($post->post_date)): ?>
                                     <span style="color:#666;"> · <?php echo esc_html($post->post_date); ?></span>
                                 <?php endif; ?>
+                                <div><a href="<?php echo esc_url(get_permalink($pid)); ?>" target="_blank" rel="noopener"><?php _e('View', 'vernal-contentum'); ?></a>
+                                · <a href="<?php echo esc_url(get_edit_post_link($pid)); ?>"><?php _e('Edit in WP', 'vernal-contentum'); ?></a></div>
                             </td>
                             <td>
                                 <div>meta: <strong><?php echo $show_number !== '' && $show_number !== false ? esc_html((string) $show_number) : '—'; ?></strong></div>
@@ -712,18 +930,23 @@ class Vernal_Settings {
                                     <?php if (!empty($row['show_number'])): ?>
                                         <div>#<?php echo esc_html((string) $row['show_number']); ?></div>
                                     <?php endif; ?>
+                                    <?php if (!empty($row['last_error'])): ?>
+                                        <div style="color:#b32d2e;font-size:11px;"><?php echo esc_html($row['last_error']); ?></div>
+                                    <?php endif; ?>
+                                <?php elseif ($is_ref_268 && $vernal_eid): ?>
+                                    <span style="color:#2271b1;"><?php _e('already on Vernal', 'vernal-contentum'); ?></span>
                                 <?php else: ?>
-                                    <span style="color:#888;"><?php _e('not discovered', 'vernal-contentum'); ?></span>
+                                    <span style="color:#888;"><?php _e('not discovered yet', 'vernal-contentum'); ?></span>
                                 <?php endif; ?>
                             </td>
                             <td style="font-size:12px; line-height:1.4;">
                                 <?php if ($diag): ?>
                                     <?php
                                     $facets = array(
-                                        'show_number' => $diag['show_number']['status'] ?? '?',
+                                        'show #' => $diag['show_number']['status'] ?? '?',
                                         'identity' => $diag['episode_identity']['status'] ?? '?',
                                         'acf' => $diag['landing_acf']['status'] ?? '?',
-                                        'enclosure' => $diag['enclosure']['status'] ?? '?',
+                                        'audio' => $diag['enclosure']['status'] ?? '?',
                                         'category' => $diag['show_category']['status'] ?? '?',
                                         'campaign' => $diag['campaign']['status'] ?? '?',
                                         'articles' => isset($diag['articles'])
@@ -743,16 +966,16 @@ class Vernal_Settings {
                             </td>
                             <td>
                                 <?php if ($destination_id > 0): ?>
-                                <form method="post" style="margin-bottom:4px;">
+                                <form method="post" style="margin-bottom:6px;">
                                     <?php wp_nonce_field('vernal_show_retrofit'); ?>
                                     <input type="hidden" name="destination_id" value="<?php echo esc_attr($destination_id); ?>" />
                                     <input type="hidden" name="wp_post_id" value="<?php echo esc_attr($pid); ?>" />
                                     <button class="button button-small" name="vernal_retrofit_action" value="discover"><?php _e('Diagnose', 'vernal-contentum'); ?></button>
-                                    <button class="button button-small" name="vernal_retrofit_action" value="ocr"><?php _e('OCR', 'vernal-contentum'); ?></button>
+                                    <button class="button button-small" name="vernal_retrofit_action" value="ocr"><?php _e('OCR cover #', 'vernal-contentum'); ?></button>
                                     <button class="button button-small" name="vernal_retrofit_action" value="dry_run"><?php _e('Dry run', 'vernal-contentum'); ?></button>
                                     <button class="button button-small" name="vernal_retrofit_action" value="reformat"><?php _e('Reformat now', 'vernal-contentum'); ?></button>
                                 </form>
-                                <form method="post" style="margin-bottom:4px;">
+                                <form method="post" style="margin-bottom:6px;">
                                     <?php wp_nonce_field('vernal_show_retrofit'); ?>
                                     <input type="hidden" name="destination_id" value="<?php echo esc_attr($destination_id); ?>" />
                                     <input type="hidden" name="wp_post_id" value="<?php echo esc_attr($pid); ?>" />
@@ -760,14 +983,26 @@ class Vernal_Settings {
                                     <button class="button button-small button-primary" name="vernal_retrofit_action" value="confirm"><?php _e('Confirm #', 'vernal-contentum'); ?></button>
                                 </form>
                                 <?php if ($row && !empty($row['id']) && in_array($row['status'], array('ready', 'failed', 'needs_review'), true)): ?>
-                                <form method="post">
+                                <form method="post" style="margin-bottom:6px;">
                                     <?php wp_nonce_field('vernal_show_retrofit'); ?>
                                     <input type="hidden" name="retrofit_id" value="<?php echo esc_attr($row['id']); ?>" />
-                                    <button class="button button-small" name="vernal_retrofit_action" value="queue"><?php _e('Queue', 'vernal-contentum'); ?></button>
+                                    <button class="button button-small" name="vernal_retrofit_action" value="queue"><?php _e('Queue for schedule', 'vernal-contentum'); ?></button>
+                                </form>
+                                <?php endif; ?>
+                                <?php if ($episode_id): ?>
+                                <form method="post">
+                                    <?php wp_nonce_field('vernal_show_retrofit'); ?>
+                                    <input type="hidden" name="episode_id" value="<?php echo esc_attr($episode_id); ?>" />
+                                    <input type="hidden" name="destination_id" value="<?php echo esc_attr($destination_id); ?>" />
+                                    <label style="font-size:11px;">
+                                        <input type="checkbox" name="ongoing_enabled" value="1" />
+                                        <?php _e('Start ongoing content', 'vernal-contentum'); ?>
+                                    </label>
+                                    <button class="button button-small" name="vernal_retrofit_action" value="ongoing"><?php _e('Save', 'vernal-contentum'); ?></button>
                                 </form>
                                 <?php endif; ?>
                                 <?php else: ?>
-                                    <em><?php _e('Set destination_id first', 'vernal-contentum'); ?></em>
+                                    <em><?php _e('Save a destination above to unlock actions', 'vernal-contentum'); ?></em>
                                 <?php endif; ?>
                             </td>
                         </tr>
@@ -775,10 +1010,25 @@ class Vernal_Settings {
                 <?php endif; ?>
                 </tbody>
             </table>
+
+            <?php
+            if ($total_pages > 1) {
+                echo '<div class="tablenav bottom"><div class="tablenav-pages">';
+                echo paginate_links(array(
+                    'base' => add_query_arg('paged', '%#%', $base),
+                    'format' => '',
+                    'current' => $paged,
+                    'total' => $total_pages,
+                    'prev_text' => '&laquo;',
+                    'next_text' => '&raquo;',
+                ));
+                echo '</div></div>';
+            }
+            ?>
         </div>
         <?php
     }
-    
+
     /**
      * Render Content Integration page
      */
