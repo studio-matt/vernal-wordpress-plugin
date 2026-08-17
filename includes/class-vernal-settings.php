@@ -711,6 +711,7 @@ class Vernal_Settings {
         $total_pages = max(1, intval($q->max_num_pages));
 
         $machine_rows = array();
+        $episode_flags = array(); // episode_id => flags; also keyed by wp_post_id
         if (!empty($backend_url) && !empty($backend_api_key)) {
             $rows_url = trailingslashit($backend_url) . 'podcasts/retrofit/rows?limit=500';
             if ($destination_id > 0) {
@@ -726,6 +727,46 @@ class Vernal_Settings {
                     foreach ($data['rows'] as $row) {
                         if (!empty($row['wp_post_id'])) {
                             $machine_rows[intval($row['wp_post_id'])] = $row;
+                        }
+                    }
+                }
+            }
+
+            // Batch-load ongoing flags for Vernal-linked posts on this page.
+            $eids = array();
+            $wpids = array();
+            foreach ($posts as $p) {
+                $pid = intval($p->ID);
+                $eid = get_post_meta($pid, 'vernal_episode_id', true);
+                if ($eid) {
+                    $eids[] = $eid;
+                }
+                if (!empty($machine_rows[$pid]['podcast_episode_id'])) {
+                    $eids[] = $machine_rows[$pid]['podcast_episode_id'];
+                }
+                $wpids[] = (string) $pid;
+            }
+            $eids = array_values(array_unique(array_filter($eids)));
+            if (!empty($eids) || !empty($wpids)) {
+                $flags_url = trailingslashit($backend_url) . 'podcasts/retrofit/episode-flags?'
+                    . http_build_query(array(
+                        'episode_ids' => implode(',', $eids),
+                        'wp_post_ids' => implode(',', $wpids),
+                    ));
+                $flags_resp = wp_remote_get($flags_url, array(
+                    'headers' => array('X-API-Key' => $backend_api_key),
+                    'timeout' => 30,
+                ));
+                if (!is_wp_error($flags_resp) && wp_remote_retrieve_response_code($flags_resp) === 200) {
+                    $flags_data = json_decode(wp_remote_retrieve_body($flags_resp), true);
+                    if (!empty($flags_data['episodes']) && is_array($flags_data['episodes'])) {
+                        foreach ($flags_data['episodes'] as $epf) {
+                            if (!empty($epf['episode_id'])) {
+                                $episode_flags[$epf['episode_id']] = $epf;
+                            }
+                            if (!empty($epf['wp_post_id'])) {
+                                $episode_flags['wp:' . intval($epf['wp_post_id'])] = $epf;
+                            }
                         }
                     }
                 }
@@ -914,6 +955,16 @@ class Vernal_Settings {
                         $diag = $row && !empty($row['diagnostic']) ? $row['diagnostic'] : null;
                         $is_ref_268 = (strval($show_number) === '268');
                         $episode_id = $row['podcast_episode_id'] ?? ($vernal_eid ?: '');
+                        $flags = null;
+                        if ($episode_id && isset($episode_flags[$episode_id])) {
+                            $flags = $episode_flags[$episode_id];
+                        } elseif (isset($episode_flags['wp:' . $pid])) {
+                            $flags = $episode_flags['wp:' . $pid];
+                            if (empty($episode_id) && !empty($flags['episode_id'])) {
+                                $episode_id = $flags['episode_id'];
+                            }
+                        }
+                        $ongoing_on = $flags ? !empty($flags['episode_ongoing_content_enabled']) : null;
                         ?>
                         <tr<?php echo $is_ref_268 ? ' style="background:#f0f6fc;"' : ''; ?>>
                             <td><?php if ($thumb): ?><img src="<?php echo esc_url($thumb); ?>" width="48" height="48" alt="" /><?php endif; ?></td>
@@ -1005,8 +1056,16 @@ class Vernal_Settings {
                                     <input type="hidden" name="episode_id" value="<?php echo esc_attr($episode_id); ?>" />
                                     <input type="hidden" name="destination_id" value="<?php echo esc_attr($destination_id); ?>" />
                                     <label style="font-size:11px;">
-                                        <input type="checkbox" name="ongoing_enabled" value="1" />
-                                        <?php _e('Start ongoing content', 'vernal-contentum'); ?>
+                                        <input type="checkbox" name="ongoing_enabled" value="1" <?php checked($ongoing_on === true); ?> />
+                                        <?php
+                                        if ($ongoing_on === true) {
+                                            _e('Ongoing content (on)', 'vernal-contentum');
+                                        } elseif ($ongoing_on === false) {
+                                            _e('Start ongoing content', 'vernal-contentum');
+                                        } else {
+                                            _e('Ongoing content', 'vernal-contentum');
+                                        }
+                                        ?>
                                     </label>
                                     <button class="button button-small" name="vernal_retrofit_action" value="ongoing"><?php _e('Save', 'vernal-contentum'); ?></button>
                                 </form>
