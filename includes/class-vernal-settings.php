@@ -518,11 +518,15 @@ class Vernal_Settings {
         $settings = get_option('vernal_contentum_settings', array());
         $backend_url = defined('VERNAL_BACKEND_URL') ? VERNAL_BACKEND_URL : (isset($settings['backend_url']) ? $settings['backend_url'] : '');
         $backend_api_key = defined('VERNAL_BACKEND_API_KEY') ? VERNAL_BACKEND_API_KEY : (isset($settings['backend_api_key']) ? $settings['backend_api_key'] : '');
+        $webapp_url = isset($settings['webapp_url']) ? rtrim((string) $settings['webapp_url'], '/') : '';
         $category_slug = isset($_REQUEST['category']) ? sanitize_title(wp_unslash($_REQUEST['category'])) : 'shows';
         $paged = max(1, isset($_GET['paged']) ? intval($_GET['paged']) : 1);
         $per_page = 25;
         $notice = '';
         $notice_type = 'info';
+        $last_plan = null;
+        $last_vernal_url = '';
+        $last_episode_id = '';
 
         $destinations = array();
         $policy = array();
@@ -680,7 +684,20 @@ class Vernal_Settings {
                         $notice .= ' ' . (is_string($result['body']['error']) ? $result['body']['error'] : wp_json_encode($result['body']['error']));
                         $notice_type = 'warning';
                     }
-                    if ($action === 'dry_run' && !empty($result['body']['planned'])) {
+                    if (!empty($result['body']['plan']) && is_array($result['body']['plan'])) {
+                        $last_plan = $result['body']['plan'];
+                    }
+                    if (!empty($result['body']['vernal_edit_url'])) {
+                        $vu = (string) $result['body']['vernal_edit_url'];
+                        if (strpos($vu, 'http') !== 0 && $webapp_url) {
+                            $vu = $webapp_url . '/' . ltrim($vu, '/');
+                        }
+                        $last_vernal_url = $vu;
+                    }
+                    if (!empty($result['body']['episode_id'])) {
+                        $last_episode_id = (string) $result['body']['episode_id'];
+                    }
+                    if ($action === 'dry_run' && empty($last_plan) && !empty($result['body']['planned'])) {
                         $notice .= ' Planned: ' . esc_html(implode(', ', (array) $result['body']['planned']));
                     }
                 } else {
@@ -782,10 +799,58 @@ class Vernal_Settings {
         ?>
         <div class="wrap">
             <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
-            <p><?php _e('Align legacy show landings with Vernal. Bill Quateman / show #268 (already published through Vernal) is a reference row — retrofit targets older episodes that still need numbers, ACF, and the 3 related articles.', 'vernal-contentum'); ?></p>
+            <p><?php _e('Retrofit reconstructs today’s Machine profile from yesterday’s real show. Existing WP copy, cover, guest fields, transcript, and enclosure stay as-is — Machine imports them, then builds QR/AR, shirt/thumb/topic candidates, and 3 article slots.', 'vernal-contentum'); ?></p>
+            <ul style="list-style:disc;margin:8px 0 12px 22px;color:#1d2327;">
+                <li><?php _e('Diagnose — snapshot + cover OCR (advisory). Confirm the show #.', 'vernal-contentum'); ?></li>
+                <li><?php _e('Dry run — preview KEEP / IMPORT / BUILD / VERIFY. No writes.', 'vernal-contentum'); ?></li>
+                <li><?php _e('Reformat now / Queue — hydrate Machine, prepare derivatives, verify history unchanged. Quota counts when the show is prepared, not when you later pick a shirt.', 'vernal-contentum'); ?></li>
+                <li><?php _e('Open in Vernal — confirm inferred guests, accept topics (articles generate after that), approve shirt and YouTube thumbnail.', 'vernal-contentum'); ?></li>
+            </ul>
 
             <?php if ($notice): ?>
                 <div class="notice notice-<?php echo esc_attr($notice_type); ?>"><p><?php echo esc_html($notice); ?></p></div>
+            <?php endif; ?>
+
+            <?php if (!empty($last_plan) && is_array($last_plan)): ?>
+                <div class="notice notice-info" style="padding:12px 16px;">
+                    <p><strong><?php _e('Dry run / reformat plan', 'vernal-contentum'); ?></strong></p>
+                    <?php foreach (array('KEEP', 'IMPORT', 'BUILD', 'VERIFY') as $section):
+                        if (empty($last_plan[$section]) || !is_array($last_plan[$section])) {
+                            continue;
+                        }
+                        ?>
+                        <p style="margin:8px 0 4px;"><strong><?php echo esc_html($section); ?></strong></p>
+                        <ul style="list-style:disc;margin:0 0 8px 22px;">
+                            <?php foreach ($last_plan[$section] as $step):
+                                $sum = is_array($step) ? ($step['summary'] ?? '') : (string) $step;
+                                if ($sum === '') {
+                                    continue;
+                                }
+                                ?>
+                                <li><?php echo esc_html($sum); ?></li>
+                            <?php endforeach; ?>
+                        </ul>
+                    <?php endforeach; ?>
+                    <?php if ($last_vernal_url || $last_episode_id):
+                        $href = $last_vernal_url;
+                        if (!$href && $last_episode_id) {
+                            $href = $webapp_url
+                                ? ($webapp_url . '/dashboard/podcast/edit/' . rawurlencode($last_episode_id))
+                                : ('/dashboard/podcast/edit/' . $last_episode_id);
+                        }
+                        ?>
+                        <p><a class="button button-primary" href="<?php echo esc_url($href); ?>" target="_blank" rel="noopener"><?php _e('Open in Vernal', 'vernal-contentum'); ?></a></p>
+                    <?php endif; ?>
+                </div>
+            <?php elseif ($last_vernal_url || $last_episode_id):
+                $href = $last_vernal_url;
+                if (!$href && $last_episode_id) {
+                    $href = $webapp_url
+                        ? ($webapp_url . '/dashboard/podcast/edit/' . rawurlencode($last_episode_id))
+                        : ('/dashboard/podcast/edit/' . $last_episode_id);
+                }
+                ?>
+                <p><a class="button button-primary" href="<?php echo esc_url($href); ?>" target="_blank" rel="noopener"><?php _e('Open in Vernal', 'vernal-contentum'); ?></a></p>
             <?php endif; ?>
 
             <?php if (empty($backend_url) || empty($backend_api_key)): ?>
@@ -1003,15 +1068,27 @@ class Vernal_Settings {
                             <td style="font-size:12px; line-height:1.4;">
                                 <?php if ($diag): ?>
                                     <?php
+                                    $guest = $diag['guest'] ?? array();
+                                    $guest_label = ($guest['status'] ?? '?');
+                                    if (!empty($guest['name'])) {
+                                        $guest_label .= ' · ' . $guest['name'];
+                                    }
+                                    $acf_missing = $diag['landing_acf']['missing'] ?? array();
+                                    $acf_status = $diag['landing_acf']['status'] ?? '?';
+                                    if (!empty($acf_missing) && is_array($acf_missing)) {
+                                        $acf_status .= ' missing: ' . implode(', ', $acf_missing);
+                                    }
+                                    $machine_ep = $diag['episode_identity']['machine_episode'] ?? ($diag['episode_identity']['status'] ?? '?');
                                     $facets = array(
                                         'show #' => $diag['show_number']['status'] ?? '?',
-                                        'identity' => $diag['episode_identity']['status'] ?? '?',
-                                        'acf' => $diag['landing_acf']['status'] ?? '?',
+                                        'Machine episode' => $machine_ep,
+                                        'Guest' => $guest_label,
+                                        'acf' => $acf_status,
                                         'audio' => $diag['enclosure']['status'] ?? '?',
                                         'category' => $diag['show_category']['status'] ?? '?',
                                         'campaign' => $diag['campaign']['status'] ?? '?',
                                         'articles' => isset($diag['articles'])
-                                            ? (($diag['articles']['actual'] ?? 0) . '/' . ($diag['articles']['expected'] ?? 3))
+                                            ? (($diag['articles']['status'] ?? '') . ' ' . ($diag['articles']['actual'] ?? 0) . '/' . ($diag['articles']['expected'] ?? 3))
                                             : '?',
                                     );
                                     foreach ($facets as $label => $val) {
@@ -1027,14 +1104,14 @@ class Vernal_Settings {
                             </td>
                             <td>
                                 <?php if ($destination_id > 0): ?>
-                                <form method="post" style="margin-bottom:6px;">
+                                <form method="post" class="vernal-retrofit-action-form" style="margin-bottom:6px;">
                                     <?php wp_nonce_field('vernal_show_retrofit'); ?>
                                     <input type="hidden" name="destination_id" value="<?php echo esc_attr($destination_id); ?>" />
                                     <input type="hidden" name="wp_post_id" value="<?php echo esc_attr($pid); ?>" />
-                                    <button class="button button-small" name="vernal_retrofit_action" value="discover"><?php _e('Diagnose', 'vernal-contentum'); ?></button>
-                                    <button class="button button-small" name="vernal_retrofit_action" value="ocr"><?php _e('OCR cover #', 'vernal-contentum'); ?></button>
-                                    <button class="button button-small" name="vernal_retrofit_action" value="dry_run"><?php _e('Dry run', 'vernal-contentum'); ?></button>
-                                    <button class="button button-small" name="vernal_retrofit_action" value="reformat"><?php _e('Reformat now', 'vernal-contentum'); ?></button>
+                                    <button class="button button-small" name="vernal_retrofit_action" value="discover" data-vernal-status="<?php echo esc_attr__('Diagnosing (includes cover OCR)…', 'vernal-contentum'); ?>"><?php _e('Diagnose', 'vernal-contentum'); ?></button>
+                                    <button class="button button-small" name="vernal_retrofit_action" value="dry_run" data-vernal-status="<?php echo esc_attr__('Planning KEEP / IMPORT / BUILD / VERIFY…', 'vernal-contentum'); ?>"><?php _e('Dry run', 'vernal-contentum'); ?></button>
+                                    <button class="button button-small" name="vernal_retrofit_action" value="reformat" data-vernal-status="<?php echo esc_attr__('Reformatting: hydrate + derive…', 'vernal-contentum'); ?>"><?php _e('Reformat now', 'vernal-contentum'); ?></button>
+                                    <button class="button button-small" name="vernal_retrofit_action" value="ocr" data-vernal-status="<?php echo esc_attr__('Re-running cover OCR…', 'vernal-contentum'); ?>"><?php _e('Re-OCR', 'vernal-contentum'); ?></button>
                                 </form>
                                 <form method="post" style="margin-bottom:6px;">
                                     <?php wp_nonce_field('vernal_show_retrofit'); ?>
@@ -1051,6 +1128,16 @@ class Vernal_Settings {
                                 </form>
                                 <?php endif; ?>
                                 <?php if ($episode_id): ?>
+                                <?php
+                                    $vernal_href = $webapp_url
+                                        ? ($webapp_url . '/dashboard/podcast/edit/' . rawurlencode((string) $episode_id))
+                                        : '';
+                                ?>
+                                <?php if ($vernal_href): ?>
+                                    <p style="margin:0 0 6px;">
+                                        <a class="button button-small" href="<?php echo esc_url($vernal_href); ?>" target="_blank" rel="noopener"><?php _e('Open in Vernal', 'vernal-contentum'); ?></a>
+                                    </p>
+                                <?php endif; ?>
                                 <form method="post">
                                     <?php wp_nonce_field('vernal_show_retrofit'); ?>
                                     <input type="hidden" name="episode_id" value="<?php echo esc_attr($episode_id); ?>" />
@@ -1095,6 +1182,45 @@ class Vernal_Settings {
             }
             ?>
         </div>
+        <div id="vernal-retrofit-status-modal" style="display:none;position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.45);">
+            <div style="background:#fff;max-width:420px;margin:18vh auto;padding:28px 24px;border:1px solid #c3c4c7;box-shadow:0 4px 20px rgba(0,0,0,.2);text-align:center;">
+                <p id="vernal-retrofit-status-text" style="font-size:15px;margin:0 0 12px;"><?php _e('Working…', 'vernal-contentum'); ?></p>
+                <p style="color:#646970;margin:0;"><?php _e('This page will reload when Machine finishes.', 'vernal-contentum'); ?></p>
+            </div>
+        </div>
+        <script>
+        (function () {
+            function showModal(msg) {
+                var el = document.getElementById('vernal-retrofit-status-modal');
+                var txt = document.getElementById('vernal-retrofit-status-text');
+                if (txt && msg) txt.textContent = msg;
+                if (el) el.style.display = 'block';
+            }
+            document.querySelectorAll('.vernal-retrofit-action-form button[name="vernal_retrofit_action"]').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    showModal(btn.getAttribute('data-vernal-status') || 'Working…');
+                });
+            });
+            document.querySelectorAll('form[method="post"]').forEach(function (form) {
+                form.addEventListener('submit', function (e) {
+                    var submitter = e.submitter;
+                    if (!submitter || submitter.name !== 'vernal_retrofit_action') return;
+                    var action = submitter.value;
+                    var map = {
+                        discover: 'Diagnosing (includes cover OCR)…',
+                        discover_page: 'Diagnosing this page…',
+                        dry_run: 'Planning KEEP / IMPORT / BUILD / VERIFY…',
+                        reformat: 'Reformatting: hydrate + derive…',
+                        ocr: 'Re-running cover OCR…',
+                        confirm: 'Confirming show number…',
+                        queue: 'Queuing…',
+                        run_tick: 'Processing one queued show…'
+                    };
+                    if (map[action]) showModal(map[action]);
+                });
+            });
+        })();
+        </script>
         <?php
     }
 
