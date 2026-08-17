@@ -521,6 +521,7 @@ class Vernal_Settings {
         $webapp_url = isset($settings['webapp_url']) ? rtrim((string) $settings['webapp_url'], '/') : '';
         $category_slug = isset($_REQUEST['category']) ? sanitize_title(wp_unslash($_REQUEST['category'])) : 'shows';
         $paged = max(1, isset($_GET['paged']) ? intval($_GET['paged']) : 1);
+        $show_aligned = !empty($_GET['show_aligned']);
         $per_page = 25;
         $notice = '';
         $notice_type = 'info';
@@ -710,23 +711,6 @@ class Vernal_Settings {
             }
         }
 
-        $cat = get_category_by_slug($category_slug);
-        $query_args = array(
-            'post_type' => 'post',
-            'post_status' => array('publish', 'draft', 'private', 'pending'),
-            'posts_per_page' => $per_page,
-            'paged' => $paged,
-            'orderby' => 'date',
-            'order' => 'DESC',
-        );
-        if ($cat && !is_wp_error($cat)) {
-            $query_args['cat'] = intval($cat->term_id);
-        }
-        $q = new WP_Query($query_args);
-        $posts = $q->posts;
-        $total = intval($q->found_posts);
-        $total_pages = max(1, intval($q->max_num_pages));
-
         $machine_rows = array();
         $episode_flags = array(); // episode_id => flags; also keyed by wp_post_id
         if (!empty($backend_url) && !empty($backend_api_key)) {
@@ -748,7 +732,65 @@ class Vernal_Settings {
                     }
                 }
             }
+        }
 
+        $exclude_ids = array();
+        if (!$show_aligned) {
+            $ref_268 = get_posts(array(
+                'post_type' => 'post',
+                'post_status' => array('publish', 'draft', 'private', 'pending'),
+                'meta_key' => 'show_number',
+                'meta_value' => '268',
+                'fields' => 'ids',
+                'posts_per_page' => 20,
+                'no_found_rows' => true,
+            ));
+            $exclude_ids = array_map('intval', is_array($ref_268) ? $ref_268 : array());
+            foreach ($machine_rows as $wpid => $row) {
+                $st = isset($row['status']) ? (string) $row['status'] : '';
+                if (in_array($st, array('complete'), true)) {
+                    $exclude_ids[] = intval($wpid);
+                }
+            }
+            $linked = get_posts(array(
+                'post_type' => 'post',
+                'post_status' => array('publish', 'draft', 'private', 'pending'),
+                'meta_key' => 'vernal_episode_id',
+                'meta_compare' => 'EXISTS',
+                'fields' => 'ids',
+                'posts_per_page' => 500,
+                'no_found_rows' => true,
+            ));
+            foreach ((array) $linked as $lid) {
+                $lid = intval($lid);
+                if ($lid && empty($machine_rows[$lid])) {
+                    $exclude_ids[] = $lid;
+                }
+            }
+            $exclude_ids = array_values(array_unique(array_filter($exclude_ids)));
+        }
+
+        $cat = get_category_by_slug($category_slug);
+        $query_args = array(
+            'post_type' => 'post',
+            'post_status' => array('publish', 'draft', 'private', 'pending'),
+            'posts_per_page' => $per_page,
+            'paged' => $paged,
+            'orderby' => 'date',
+            'order' => 'DESC',
+        );
+        if ($cat && !is_wp_error($cat)) {
+            $query_args['cat'] = intval($cat->term_id);
+        }
+        if (!empty($exclude_ids)) {
+            $query_args['post__not_in'] = $exclude_ids;
+        }
+        $q = new WP_Query($query_args);
+        $posts = $q->posts;
+        $total = intval($q->found_posts);
+        $total_pages = max(1, intval($q->max_num_pages));
+
+        if (!empty($backend_url) && !empty($backend_api_key)) {
             // Batch-load ongoing flags for Vernal-linked posts on this page.
             $eids = array();
             $wpids = array();
@@ -803,8 +845,9 @@ class Vernal_Settings {
             <ul style="list-style:disc;margin:8px 0 12px 22px;color:#1d2327;">
                 <li><?php _e('Diagnose — snapshot + cover OCR (advisory). Confirm the show #.', 'vernal-contentum'); ?></li>
                 <li><?php _e('Dry run — preview KEEP / IMPORT / BUILD / VERIFY. No writes.', 'vernal-contentum'); ?></li>
-                <li><?php _e('Reformat now / Queue — hydrate Machine, prepare derivatives, verify history unchanged. Quota counts when the show is prepared, not when you later pick a shirt.', 'vernal-contentum'); ?></li>
-                <li><?php _e('Open in Vernal — confirm inferred guests, accept topics (articles generate after that), approve shirt and YouTube thumbnail.', 'vernal-contentum'); ?></li>
+                <li><?php _e('Reformat now — run hydrate + derive immediately for this one show.', 'vernal-contentum'); ?></li>
+                <li><?php _e('Queue for schedule — add this show to the retrofit drip (default 1/weekday, 5/week). The worker hydrates/derives the Machine profile; it does not pick a WordPress publish time or change the existing landing URL/date. Related articles stay drafts until you accept topics in Vernal; they can then use the show’s normal content schedule / balancer.', 'vernal-contentum'); ?></li>
+                <li><?php _e('Open in Vernal — confirm inferred guests, accept topics, approve shirt and YouTube thumbnail. Shows already fully on Vernal (including Bill / #268) are hidden from this list.', 'vernal-contentum'); ?></li>
             </ul>
 
             <?php if ($notice): ?>
@@ -973,6 +1016,13 @@ class Vernal_Settings {
                     $total_pages
                 );
                 ?>
+                ·
+                <?php if ($show_aligned): ?>
+                    <a href="<?php echo esc_url(remove_query_arg('show_aligned')); ?>"><?php _e('Hide already-aligned', 'vernal-contentum'); ?></a>
+                <?php else: ?>
+                    <a href="<?php echo esc_url(add_query_arg('show_aligned', '1')); ?>"><?php _e('Show already-aligned (incl. #268)', 'vernal-contentum'); ?></a>
+                    <span style="color:#646970;"> — <?php _e('Bill / #268 and completed Vernal shows are hidden by default.', 'vernal-contentum'); ?></span>
+                <?php endif; ?>
             </p>
 
             <?php
@@ -981,6 +1031,9 @@ class Vernal_Settings {
                 'destination_id' => $destination_id,
                 'category' => $category_slug,
             ), $base);
+            if ($show_aligned) {
+                $base = add_query_arg('show_aligned', '1', $base);
+            }
             if ($total_pages > 1) {
                 echo '<div class="tablenav top"><div class="tablenav-pages">';
                 echo paginate_links(array(
@@ -1030,6 +1083,10 @@ class Vernal_Settings {
                             }
                         }
                         $ongoing_on = $flags ? !empty($flags['episode_ongoing_content_enabled']) : null;
+                        $row_status = $row['status'] ?? '';
+                        $aligned_locked = $is_ref_268
+                            || ($row_status === 'complete')
+                            || ($vernal_eid && empty($row));
                         ?>
                         <tr<?php echo $is_ref_268 ? ' style="background:#f0f6fc;"' : ''; ?>>
                             <td><?php if ($thumb): ?><img src="<?php echo esc_url($thumb); ?>" width="48" height="48" alt="" /><?php endif; ?></td>
@@ -1103,7 +1160,16 @@ class Vernal_Settings {
                                 <?php endif; ?>
                             </td>
                             <td>
-                                <?php if ($destination_id > 0): ?>
+                                <?php if ($destination_id > 0 && $aligned_locked): ?>
+                                    <p style="color:#646970;margin:0 0 6px;font-size:12px;"><?php _e('Already on Vernal — no retrofit actions.', 'vernal-contentum'); ?></p>
+                                    <?php
+                                    $vernal_href = ($episode_id && $webapp_url)
+                                        ? ($webapp_url . '/dashboard/podcast/edit/' . rawurlencode((string) $episode_id))
+                                        : '';
+                                    if ($vernal_href): ?>
+                                        <a class="button button-small" href="<?php echo esc_url($vernal_href); ?>" target="_blank" rel="noopener"><?php _e('Open in Vernal', 'vernal-contentum'); ?></a>
+                                    <?php endif; ?>
+                                <?php elseif ($destination_id > 0): ?>
                                 <form method="post" class="vernal-retrofit-action-form" style="margin-bottom:6px;">
                                     <?php wp_nonce_field('vernal_show_retrofit'); ?>
                                     <input type="hidden" name="destination_id" value="<?php echo esc_attr($destination_id); ?>" />
