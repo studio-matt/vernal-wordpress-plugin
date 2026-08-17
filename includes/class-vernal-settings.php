@@ -548,10 +548,20 @@ class Vernal_Settings {
                     }
                 }
             } else {
-                $notice = __('Could not reach Machine bootstrap (check Connection API key).', 'vernal-contentum');
+                $notice = __('Could not reach Machine bootstrap.', 'vernal-contentum');
                 $notice_type = 'warning';
                 if (is_wp_error($boot_resp)) {
                     $notice .= ' ' . $boot_resp->get_error_message();
+                } else {
+                    $code = wp_remote_retrieve_response_code($boot_resp);
+                    $body = wp_remote_retrieve_body($boot_resp);
+                    $notice .= ' HTTP ' . intval($code);
+                    if ($body) {
+                        $notice .= ': ' . substr(wp_strip_all_tags($body), 0, 240);
+                    }
+                    if (intval($code) === 404) {
+                        $notice .= ' ' . __('(Machine is missing the retrofit API — redeploy backend.)', 'vernal-contentum');
+                    }
                 }
             }
         }
