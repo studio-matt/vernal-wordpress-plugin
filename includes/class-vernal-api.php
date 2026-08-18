@@ -1264,6 +1264,10 @@ class Vernal_API {
             'thumbnail',
             'ih_guest_headshot',
             'ih_guest_headshot_url',
+            'ih_partner_company_logo',
+        );
+        $gallery_keys = array(
+            'ih_partner_gallery',
         );
         foreach ($acf as $key => $value) {
             $key = is_string($key) ? $key : '';
@@ -1275,6 +1279,26 @@ class Vernal_API {
 
             if ($target_key === 'thumbnail' && $thumbnail_attachment_id) {
                 $this->set_acf_or_meta($post_id, 'thumbnail', $thumbnail_attachment_id);
+                continue;
+            }
+
+            if (in_array($target_key, $gallery_keys, true)) {
+                $ids = array();
+                $items = is_array($value) ? $value : array();
+                foreach ($items as $item) {
+                    if (is_numeric($item)) {
+                        $ids[] = intval($item);
+                        continue;
+                    }
+                    $url = is_string($item) ? esc_url_raw(trim($item)) : '';
+                    if ($url && preg_match('#^https?://#i', $url)) {
+                        $att = $this->sideload_image_attachment($post_id, $url);
+                        if ($att) {
+                            $ids[] = $att;
+                        }
+                    }
+                }
+                $this->set_acf_or_meta($post_id, $target_key, $ids);
                 continue;
             }
 
