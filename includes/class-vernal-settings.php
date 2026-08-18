@@ -651,17 +651,12 @@ class Vernal_Settings {
                     'show_number' => intval($_POST['show_number'] ?? 0),
                     'force' => !empty($_POST['force']),
                 ));
-            } elseif ($action === 'dry_run' && $wp_post_id && $destination_id) {
-                $result = $machine_call('POST', 'podcasts/retrofit/reconcile', array(
-                    'destination_id' => $destination_id,
-                    'wp_post_id' => $wp_post_id,
-                    'dry_run' => true,
-                ));
-            } elseif ($action === 'reformat' && $wp_post_id && $destination_id) {
+            } elseif ($action === 'stage_show' && $wp_post_id && $destination_id) {
                 $result = $machine_call('POST', 'podcasts/retrofit/reconcile', array(
                     'destination_id' => $destination_id,
                     'wp_post_id' => $wp_post_id,
                     'dry_run' => false,
+                    'stage_only' => true,
                 ));
             } elseif ($action === 'queue' && !empty($_POST['retrofit_id'])) {
                 $result = $machine_call('POST', 'podcasts/retrofit/queue', array(
@@ -698,8 +693,8 @@ class Vernal_Settings {
                     if (!empty($result['body']['episode_id'])) {
                         $last_episode_id = (string) $result['body']['episode_id'];
                     }
-                    if ($action === 'dry_run' && empty($last_plan) && !empty($result['body']['planned'])) {
-                        $notice .= ' Planned: ' . esc_html(implode(', ', (array) $result['body']['planned']));
+                    if ($action === 'stage_show' && !empty($result['body']['episode_id'])) {
+                        $notice = __('Show staged in Vernal. Open it to approve guest, shirts, thumbnail, and articles, then Publish to Queue.', 'vernal-contentum');
                     }
                 } else {
                     $notice = isset($result['error']) ? $result['error'] : sprintf(__('Backend HTTP %d', 'vernal-contentum'), intval($result['code'] ?? 0));
@@ -841,13 +836,12 @@ class Vernal_Settings {
         ?>
         <div class="wrap">
             <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
-            <p><?php _e('Retrofit reconstructs today’s Machine profile from yesterday’s real show. Existing WP copy, cover, guest fields, transcript, and enclosure stay as-is — Machine imports them, then builds QR/AR, shirt/thumb/topic candidates, and 3 article slots.', 'vernal-contentum'); ?></p>
+            <p><?php _e('This page is a temporary hatch to get legacy landings into Vernal. Confirm the show #, then Stage Show. Approve guest, links, shirts, thumbnail, and article drafts in Vernal, then Publish to Queue. This WP tool can go away once the catalog is staged.', 'vernal-contentum'); ?></p>
             <ul style="list-style:disc;margin:8px 0 12px 22px;color:#1d2327;">
                 <li><?php _e('Diagnose — snapshot + cover OCR (advisory). Confirm the show #.', 'vernal-contentum'); ?></li>
-                <li><?php _e('Dry run — preview KEEP / IMPORT / BUILD / VERIFY. No writes.', 'vernal-contentum'); ?></li>
-                <li><?php _e('Reformat now — run hydrate + derive immediately for this one show.', 'vernal-contentum'); ?></li>
-                <li><?php _e('Queue for schedule — add this show to the retrofit drip (default 1/weekday, 5/week). The worker hydrates/derives the Machine profile; it does not pick a WordPress publish time or change the existing landing URL/date. Related articles stay drafts until you accept topics in Vernal; they can then use the show’s normal content schedule / balancer.', 'vernal-contentum'); ?></li>
-                <li><?php _e('Open in Vernal — confirm inferred guests, accept topics, approve shirt and YouTube thumbnail. Shows already fully on Vernal (including Bill / #268) are hidden from this list.', 'vernal-contentum'); ?></li>
+                <li><?php _e('Stage Show — create the Vernal show (transcript, guest, shirts, topics, draft articles). Does not use the 5/week quota.', 'vernal-contentum'); ?></li>
+                <li><?php _e('Open in Vernal — approve blanks, then Publish to Queue (1/weekday, 5/week, WP-safe only — no social launch).', 'vernal-contentum'); ?></li>
+                <li><?php _e('Shows already fully on Vernal (including Bill / #268) are hidden from this list.', 'vernal-contentum'); ?></li>
             </ul>
 
             <?php if ($notice): ?>
@@ -856,7 +850,7 @@ class Vernal_Settings {
 
             <?php if (!empty($last_plan) && is_array($last_plan)): ?>
                 <div class="notice notice-info" style="padding:12px 16px;">
-                    <p><strong><?php _e('Dry run / reformat plan', 'vernal-contentum'); ?></strong></p>
+                    <p><strong><?php _e('Stage Show plan', 'vernal-contentum'); ?></strong></p>
                     <?php foreach (array('KEEP', 'IMPORT', 'BUILD', 'VERIFY') as $section):
                         if (empty($last_plan[$section]) || !is_array($last_plan[$section])) {
                             continue;
@@ -1175,8 +1169,7 @@ class Vernal_Settings {
                                     <input type="hidden" name="destination_id" value="<?php echo esc_attr($destination_id); ?>" />
                                     <input type="hidden" name="wp_post_id" value="<?php echo esc_attr($pid); ?>" />
                                     <button class="button button-small" name="vernal_retrofit_action" value="discover" data-vernal-status="<?php echo esc_attr__('Diagnosing (includes cover OCR)…', 'vernal-contentum'); ?>"><?php _e('Diagnose', 'vernal-contentum'); ?></button>
-                                    <button class="button button-small" name="vernal_retrofit_action" value="dry_run" data-vernal-status="<?php echo esc_attr__('Planning KEEP / IMPORT / BUILD / VERIFY…', 'vernal-contentum'); ?>"><?php _e('Dry run', 'vernal-contentum'); ?></button>
-                                    <button class="button button-small" name="vernal_retrofit_action" value="reformat" data-vernal-status="<?php echo esc_attr__('Reformatting: hydrate + derive…', 'vernal-contentum'); ?>"><?php _e('Reformat now', 'vernal-contentum'); ?></button>
+                                    <button class="button button-small button-primary" name="vernal_retrofit_action" value="stage_show" data-vernal-status="<?php echo esc_attr__('Staging show in Vernal…', 'vernal-contentum'); ?>"><?php _e('Stage Show', 'vernal-contentum'); ?></button>
                                     <button class="button button-small" name="vernal_retrofit_action" value="ocr" data-vernal-status="<?php echo esc_attr__('Re-running cover OCR…', 'vernal-contentum'); ?>"><?php _e('Re-OCR', 'vernal-contentum'); ?></button>
                                 </form>
                                 <form method="post" style="margin-bottom:6px;">
@@ -1186,7 +1179,7 @@ class Vernal_Settings {
                                     <input type="number" name="show_number" placeholder="#" value="<?php echo esc_attr($ocr ?: $show_number); ?>" style="width:70px;" />
                                     <button class="button button-small button-primary" name="vernal_retrofit_action" value="confirm"><?php _e('Confirm #', 'vernal-contentum'); ?></button>
                                 </form>
-                                <?php if ($row && !empty($row['id']) && in_array($row['status'], array('ready', 'failed', 'needs_review'), true)): ?>
+                                <?php if ($row && !empty($row['id']) && in_array($row['status'], array('ready', 'failed', 'needs_review', 'staged'), true)): ?>
                                 <form method="post" style="margin-bottom:6px;">
                                     <?php wp_nonce_field('vernal_show_retrofit'); ?>
                                     <input type="hidden" name="retrofit_id" value="<?php echo esc_attr($row['id']); ?>" />
@@ -1275,8 +1268,7 @@ class Vernal_Settings {
                     var map = {
                         discover: 'Diagnosing (includes cover OCR)…',
                         discover_page: 'Diagnosing this page…',
-                        dry_run: 'Planning KEEP / IMPORT / BUILD / VERIFY…',
-                        reformat: 'Reformatting: hydrate + derive…',
+                        stage_show: 'Staging show in Vernal…',
                         ocr: 'Re-running cover OCR…',
                         confirm: 'Confirming show number…',
                         queue: 'Queuing…',
