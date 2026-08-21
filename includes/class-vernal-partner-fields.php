@@ -18,6 +18,104 @@ class Vernal_Partner_Fields {
     public static function init() {
         add_action('acf/init', array(__CLASS__, 'register_field_group'));
         add_action('init', array(__CLASS__, 'maybe_register'), 20);
+        // Elementor ACF Gallery tags go empty when ACF's gallery format_value can't
+        // resolve attachments via acf_get_posts — rebuild image arrays from IDs.
+        add_filter(
+            'acf/format_value/key=field_ih_partner_gallery',
+            array(__CLASS__, 'format_partner_gallery_value'),
+            20,
+            3
+        );
+        add_filter(
+            'acf/format_value/name=ih_partner_gallery',
+            array(__CLASS__, 'format_partner_gallery_value'),
+            20,
+            3
+        );
+    }
+
+    /**
+     * Ensure Partner gallery returns Elementor-friendly image data.
+     *
+     * @param mixed $value
+     * @param int   $post_id
+     * @param array $field
+     * @return mixed
+     */
+    public static function format_partner_gallery_value($value, $post_id, $field) {
+        $ids = array();
+        if (is_array($value)) {
+            foreach ($value as $item) {
+                if (is_numeric($item)) {
+                    $ids[] = intval($item);
+                } elseif (is_array($item) && !empty($item['ID'])) {
+                    $ids[] = intval($item['ID']);
+                } elseif (is_array($item) && !empty($item['id'])) {
+                    $ids[] = intval($item['id']);
+                } elseif (is_object($item) && !empty($item->ID)) {
+                    $ids[] = intval($item->ID);
+                }
+            }
+        } elseif (is_numeric($value)) {
+            $ids[] = intval($value);
+        }
+
+        if (empty($ids)) {
+            $raw = get_post_meta($post_id, 'ih_partner_gallery', true);
+            if (is_array($raw)) {
+                $ids = array_map('intval', $raw);
+            } elseif (is_string($raw) && $raw !== '') {
+                $decoded = json_decode($raw, true);
+                if (is_array($decoded)) {
+                    $ids = array_map('intval', $decoded);
+                }
+            }
+        }
+
+        $ids = array_values(array_filter(array_map('intval', $ids)));
+        if (empty($ids)) {
+            return $value;
+        }
+
+        $format = isset($field['return_format']) ? $field['return_format'] : 'array';
+        if ($format === 'id') {
+            return $ids;
+        }
+        if ($format === 'url') {
+            $urls = array();
+            foreach ($ids as $id) {
+                $url = wp_get_attachment_url($id);
+                if ($url) {
+                    $urls[] = $url;
+                }
+            }
+            return $urls;
+        }
+
+        $out = array();
+        foreach ($ids as $id) {
+            if (function_exists('acf_get_attachment')) {
+                $att = acf_get_attachment($id);
+                if (is_array($att) && !empty($att['url'])) {
+                    if (empty($att['id']) && !empty($att['ID'])) {
+                        $att['id'] = $att['ID'];
+                    }
+                    $out[] = $att;
+                    continue;
+                }
+            }
+            $url = wp_get_attachment_url($id);
+            if (!$url) {
+                continue;
+            }
+            $out[] = array(
+                'ID' => $id,
+                'id' => $id,
+                'url' => $url,
+                'alt' => get_post_meta($id, '_wp_attachment_image_alt', true),
+            );
+        }
+        return !empty($out) ? $out : $value;
     }
 
     public static function maybe_register() {
