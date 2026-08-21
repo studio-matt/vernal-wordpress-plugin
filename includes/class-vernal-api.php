@@ -771,6 +771,23 @@ class Vernal_API {
             wp_update_post($update);
             $updated_keys[] = 'excerpt';
         }
+        // Partner landings (and any caller) may send semantic body here.
+        // Shows typically omit content so Elementor ACF stays the source of truth.
+        if (array_key_exists('content', $params) && is_string($params['content'])) {
+            $update = array(
+                'ID' => $post_id,
+                'post_content' => wp_kses_post($params['content']),
+            );
+            if ($preserve) {
+                $update['post_date'] = $saved_date;
+                $update['post_date_gmt'] = $saved_date_gmt;
+                $update['post_name'] = $saved_name;
+                $update['post_author'] = $saved_author;
+                $update['edit_date'] = true;
+            }
+            wp_update_post($update);
+            $updated_keys[] = 'content';
+        }
         if (!$preserve && !empty($params['status']) && in_array($params['status'], array('draft', 'publish', 'private', 'pending'), true)) {
             wp_update_post(array(
                 'ID' => $post_id,
