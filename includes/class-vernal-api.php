@@ -882,8 +882,36 @@ class Vernal_API {
                 'preserve_publication' => $preserve,
                 'post_date' => get_post_field('post_date', $post_id),
                 'slug' => get_post_field('post_name', $post_id),
+                'plugin_version' => defined('VERNAL_CONTENTUM_VERSION') ? VERNAL_CONTENTUM_VERSION : null,
+                'gallery_debug' => $this->debug_partner_gallery($post_id),
             ),
         ));
+    }
+
+    /**
+     * Diagnose Partner gallery storage for Elementor troubleshooting.
+     */
+    private function debug_partner_gallery($post_id) {
+        $name = 'ih_partner_gallery';
+        $raw = get_post_meta($post_id, $name, true);
+        $ref = get_post_meta($post_id, '_' . $name, true);
+        $field = function_exists('acf_get_field') ? acf_get_field($name) : null;
+        $field_by_key = function_exists('acf_get_field') ? acf_get_field('field_ih_partner_gallery') : null;
+        $formatted = function_exists('get_field') ? get_field($name, $post_id) : null;
+        return array(
+            'raw_meta_type' => gettype($raw),
+            'raw_meta' => $raw,
+            'reference_meta' => $ref,
+            'field_found' => is_array($field),
+            'field_type' => is_array($field) ? (isset($field['type']) ? $field['type'] : null) : null,
+            'field_return_format' => is_array($field) ? (isset($field['return_format']) ? $field['return_format'] : null) : null,
+            'field_key_found' => is_array($field_by_key),
+            'get_field_type' => gettype($formatted),
+            'get_field_count' => is_array($formatted) ? count($formatted) : 0,
+            'get_field_sample' => is_array($formatted) && !empty($formatted)
+                ? (is_array($formatted[0]) ? array_intersect_key($formatted[0], array_flip(array('ID', 'id', 'url'))) : $formatted[0])
+                : null,
+        );
     }
 
     /**
@@ -1280,14 +1308,27 @@ class Vernal_API {
         $ids = array_values(array_filter(array_map('intval', is_array($ids) ? $ids : array())));
         $field_name = is_string($field_name) ? $field_name : '';
         if ($field_name === '') {
-            return;
+            return false;
         }
         $field_key = (strpos($field_name, 'field_') === 0) ? $field_name : ('field_' . $field_name);
         $name = (strpos($field_name, 'field_') === 0) ? substr($field_name, 6) : $field_name;
 
+        // Clear any prior JSON-string / corrupt meta from older plugin builds.
+        delete_post_meta($post_id, $name);
+        delete_post_meta($post_id, '_' . $name);
+
         $updated = false;
-        if (function_exists('update_field')) {
-            // Prefer stable field key; fall back to name.
+        if (function_exists('acf_get_field') && function_exists('acf_update_value')) {
+            $field = acf_get_field($field_key);
+            if (!$field) {
+                $field = acf_get_field($name);
+            }
+            if (is_array($field)) {
+                acf_update_value($ids, $post_id, $field);
+                $updated = true;
+            }
+        }
+        if (!$updated && function_exists('update_field')) {
             $result = update_field($field_key, $ids, $post_id);
             if ($result === false) {
                 $result = update_field($name, $ids, $post_id);
@@ -1295,14 +1336,13 @@ class Vernal_API {
             $updated = ($result !== false);
         }
 
-        // Always write ACF-native meta so Elementor works even when update_field flakes.
+        // Always write ACF-native meta so Elementor can resolve attachment IDs.
         update_post_meta($post_id, $name, $ids);
         update_post_meta($post_id, '_' . $name, $field_key);
 
         if (function_exists('acf_flush_value_cache')) {
             acf_flush_value_cache($post_id);
         } elseif (function_exists('acf_get_store')) {
-            // Older ACF: clear values store when available.
             $store = acf_get_store('values');
             if ($store && method_exists($store, 'remove')) {
                 $store->remove($post_id);
