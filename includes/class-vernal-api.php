@@ -840,7 +840,7 @@ class Vernal_API {
                 }
                 $verified[$acf_key] = $this->read_acf_or_meta($post_id, $acf_key);
             }
-            foreach (array('ih_guests_name', 'ih_guest_name', 'shirt_prints', 'shirt_prints_back', 'shirt_front', 'shirt_back') as $probe) {
+            foreach (array('ih_guests_name', 'ih_guest_name', 'shirt_prints', 'shirt_prints_back', 'shirt_front', 'shirt_back', 'ih_partner_gallery') as $probe) {
                 if (!array_key_exists($probe, $verified)) {
                     $verified[$probe] = $this->read_acf_or_meta($post_id, $probe);
                 }
@@ -1251,12 +1251,15 @@ class Vernal_API {
     }
     
     /**
-     * Persist post meta; arrays/objects stored as JSON strings.
+     * Persist post meta; arrays/objects stored as native PHP values.
+     *
+     * Important: ACF Gallery/Image fields must receive real PHP arrays of attachment
+     * IDs — JSON strings break Elementor ACF Gallery dynamic tags.
      */
     private function set_post_meta_value($post_id, $key, $value) {
         $meta_key = sanitize_key($key);
         if (is_array($value) || is_object($value)) {
-            update_post_meta($post_id, $meta_key, wp_json_encode($value));
+            update_post_meta($post_id, $meta_key, $value);
             return;
         }
         if (is_bool($value)) {
@@ -1264,6 +1267,49 @@ class Vernal_API {
             return;
         }
         update_post_meta($post_id, $meta_key, is_string($value) ? sanitize_text_field($value) : $value);
+    }
+
+    /**
+     * Persist an ACF Gallery field so Elementor can read attachment IDs.
+     *
+     * @param int   $post_id
+     * @param string $field_name Field name, e.g. ih_partner_gallery
+     * @param array $ids Attachment IDs
+     */
+    private function set_acf_gallery_ids($post_id, $field_name, $ids) {
+        $ids = array_values(array_filter(array_map('intval', is_array($ids) ? $ids : array())));
+        $field_name = is_string($field_name) ? $field_name : '';
+        if ($field_name === '') {
+            return;
+        }
+        $field_key = (strpos($field_name, 'field_') === 0) ? $field_name : ('field_' . $field_name);
+        $name = (strpos($field_name, 'field_') === 0) ? substr($field_name, 6) : $field_name;
+
+        $updated = false;
+        if (function_exists('update_field')) {
+            // Prefer stable field key; fall back to name.
+            $result = update_field($field_key, $ids, $post_id);
+            if ($result === false) {
+                $result = update_field($name, $ids, $post_id);
+            }
+            $updated = ($result !== false);
+        }
+
+        // Always write ACF-native meta so Elementor works even when update_field flakes.
+        update_post_meta($post_id, $name, $ids);
+        update_post_meta($post_id, '_' . $name, $field_key);
+
+        if (function_exists('acf_flush_value_cache')) {
+            acf_flush_value_cache($post_id);
+        } elseif (function_exists('acf_get_store')) {
+            // Older ACF: clear values store when available.
+            $store = acf_get_store('values');
+            if ($store && method_exists($store, 'remove')) {
+                $store->remove($post_id);
+            }
+        }
+
+        return $updated || !empty($ids);
     }
 
     /**
@@ -1283,8 +1329,11 @@ class Vernal_API {
             'ih_guest_headshot_url',
             'ih_partner_company_logo',
         );
+        // Name + common aliases Elementor may have been bound to.
         $gallery_keys = array(
             'ih_partner_gallery',
+            'field_ih_partner_gallery',
+            'partner_gallery',
         );
         foreach ($acf as $key => $value) {
             $key = is_string($key) ? $key : '';
@@ -1315,7 +1364,11 @@ class Vernal_API {
                         }
                     }
                 }
-                $this->set_acf_or_meta($post_id, $target_key, $ids);
+                // Canonical write for Elementor: always ih_partner_gallery.
+                $this->set_acf_gallery_ids($post_id, 'ih_partner_gallery', $ids);
+                if ($target_key !== 'ih_partner_gallery' && $target_key !== 'field_ih_partner_gallery') {
+                    $this->set_acf_gallery_ids($post_id, $target_key, $ids);
+                }
                 continue;
             }
 
