@@ -1434,14 +1434,23 @@ class Vernal_API {
                 continue;
             }
 
-            if ($target_key === 'ih_guest_links' || $target_key === 'ih_guest_links_json' || $target_key === 'ih_guest_links_html') {
+            if ($target_key === 'ih_guest_links_html') {
+                $raw = is_string($value) ? ltrim($value) : '';
+                if ($raw !== '' && isset($raw[0]) && $raw[0] === '<') {
+                    $this->set_acf_or_meta($post_id, 'ih_guest_links_html', $value);
+                    continue;
+                }
+            }
+            if ($target_key === 'ih_guest_links' || $target_key === 'ih_guest_links_json') {
                 $rows = $this->normalize_guest_links_rows($value);
                 $this->set_acf_or_meta($post_id, 'ih_guest_links', $rows);
                 $this->set_acf_or_meta($post_id, 'ih_guest_links_json', wp_json_encode($rows));
                 $html = class_exists('Vernal_Show_Notes_Fields')
                     ? Vernal_Show_Notes_Fields::guest_links_to_html($rows)
                     : '';
-                $this->set_acf_or_meta($post_id, 'ih_guest_links_html', $html);
+                if ($html !== '') {
+                    $this->set_acf_or_meta($post_id, 'ih_guest_links_html', $html);
+                }
                 $this->set_acf_or_meta($post_id, 'ih_has_guest_links', !empty($rows) ? 1 : 0);
                 continue;
             }
