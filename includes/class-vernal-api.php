@@ -1444,7 +1444,9 @@ class Vernal_API {
             if ($target_key === 'ih_guest_links' || $target_key === 'ih_guest_links_json') {
                 $rows = $this->normalize_guest_links_rows($value);
                 $this->set_acf_or_meta($post_id, 'ih_guest_links', $rows);
-                $this->set_acf_or_meta($post_id, 'ih_guest_links_json', wp_json_encode($rows));
+                $json = wp_json_encode($rows);
+                $this->set_acf_or_meta($post_id, 'ih_guest_links_json', $json);
+                update_post_meta($post_id, 'ih_guest_links_json', $json);
                 $html = class_exists('Vernal_Show_Notes_Fields')
                     ? Vernal_Show_Notes_Fields::guest_links_to_html($rows)
                     : '';

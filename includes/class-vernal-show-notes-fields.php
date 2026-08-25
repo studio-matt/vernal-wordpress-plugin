@@ -222,18 +222,35 @@ class Vernal_Show_Notes_Fields {
         if ($post_id <= 0) {
             return array();
         }
-        $raw = function_exists('get_field') ? get_field('ih_guest_links', $post_id, false) : null;
-        $rows = self::normalize_guest_link_rows($raw);
-        if (!empty($rows)) {
-            return $rows;
+
+        $tries = array();
+        if (function_exists('have_rows') && have_rows('ih_guest_links', $post_id)) {
+            $from_rows = array();
+            while (have_rows('ih_guest_links', $post_id)) {
+                the_row();
+                $from_rows[] = array(
+                    'name' => (string) (get_sub_field('link_name') ?: get_sub_field('name') ?: ''),
+                    'description' => (string) (get_sub_field('link_description') ?: get_sub_field('description') ?: ''),
+                    'url' => (string) (get_sub_field('link_url') ?: get_sub_field('url') ?: ''),
+                );
+            }
+            $tries[] = $from_rows;
         }
-        $json = get_post_meta($post_id, 'ih_guest_links_json', true);
-        $rows = self::normalize_guest_link_rows($json);
-        if (!empty($rows)) {
-            return $rows;
+        if (function_exists('get_field')) {
+            $tries[] = get_field('ih_guest_links', $post_id);
+            $tries[] = get_field('ih_guest_links', $post_id, false);
+            $tries[] = get_field('ih_guest_links_json', $post_id, false);
         }
-        $html = get_post_meta($post_id, 'ih_guest_links_html', true);
-        return self::normalize_guest_link_rows($html);
+        $tries[] = get_post_meta($post_id, 'ih_guest_links_json', true);
+        $tries[] = get_post_meta($post_id, 'ih_guest_links', true);
+
+        foreach ($tries as $raw) {
+            $rows = self::normalize_guest_link_rows($raw);
+            if (!empty($rows)) {
+                return $rows;
+            }
+        }
+        return array();
     }
 
     public static function row_from_item($item) {
@@ -262,29 +279,32 @@ class Vernal_Show_Notes_Fields {
                 continue;
             }
             $url = '';
-            if (!empty($item['url'])) {
-                $url = esc_url_raw((string) $item['url']);
-            } elseif (!empty($item['link_url'])) {
-                $url = esc_url_raw((string) $item['link_url']);
+            $name = '';
+            $description = '';
+            foreach ($item as $k => $v) {
+                if (!is_string($v) && !is_numeric($v)) {
+                    continue;
+                }
+                $v = trim((string) $v);
+                if ($v === '') {
+                    continue;
+                }
+                $lk = strtolower((string) $k);
+                if ($url === '' && (strpos($lk, 'url') !== false || strpos($lk, 'link') !== false) && preg_match('#^https?://#i', $v)) {
+                    $url = esc_url_raw($v);
+                } elseif ($url === '' && preg_match('#^https?://#i', $v) && strpos($lk, 'desc') === false) {
+                    $url = esc_url_raw($v);
+                } elseif ($name === '' && (strpos($lk, 'name') !== false || $lk === 'title' || substr($lk, -5) === 'title')) {
+                    $name = sanitize_text_field($v);
+                } elseif ($description === '' && (strpos($lk, 'desc') !== false || strpos($lk, 'snippet') !== false)) {
+                    $description = sanitize_textarea_field($v);
+                }
             }
             if ($url === '') {
                 continue;
             }
-            $name = '';
-            if (!empty($item['name'])) {
-                $name = sanitize_text_field((string) $item['name']);
-            } elseif (!empty($item['link_name'])) {
-                $name = sanitize_text_field((string) $item['link_name']);
-            } elseif (!empty($item['title'])) {
-                $name = sanitize_text_field((string) $item['title']);
-            }
-            $description = '';
-            if (!empty($item['description'])) {
+            if ($description === '' && !empty($item['description'])) {
                 $description = sanitize_textarea_field((string) $item['description']);
-            } elseif (!empty($item['link_description'])) {
-                $description = sanitize_textarea_field((string) $item['link_description']);
-            } elseif (!empty($item['snippet'])) {
-                $description = sanitize_textarea_field((string) $item['snippet']);
             }
             $rows[] = array(
                 'name' => $name,
