@@ -132,15 +132,24 @@ class Vernal_Show_Notes_Fields {
             if ($name === '') {
                 $name = $url;
             }
-            $out .= '<p class="ih-guest-link">';
-            $out .= '<a href="' . esc_url($url) . '" target="_blank" rel="noopener noreferrer">' . esc_html($name) . '</a>';
+            $out .= '<article class="ih-guest-link">';
+            $out .= '<a class="ih-guest-link__name" href="' . esc_url($url) . '" target="_blank" rel="noopener noreferrer">' . esc_html($name) . '</a>';
             if ($desc !== '') {
-                $out .= '<br><span class="ih-guest-link-desc">' . esc_html($desc) . '</span>';
+                $out .= '<p class="ih-guest-link__description">' . esc_html($desc) . '</p>';
             }
-            $out .= '</p>';
+            $out .= '</article>';
         }
         $out .= '</div>';
         return $out;
+    }
+
+    public static function rows_from_value($value) {
+        return self::normalize_guest_link_rows($value);
+    }
+
+    public static function row_from_item($item) {
+        $rows = self::normalize_guest_link_rows(array($item));
+        return !empty($rows) ? $rows[0] : array();
     }
 
     private static function normalize_guest_link_rows($value) {
