@@ -139,14 +139,9 @@ class Vernal_Guest_Links_Widget extends \Elementor\Widget_Base {
         }
 
         $rows = array();
-        if (function_exists('get_field')) {
-            $raw = get_field('ih_guest_links');
-            if (empty($raw)) {
-                $raw = get_field('ih_guest_links_json', false, false);
-            }
-            if (class_exists('Vernal_Show_Notes_Fields')) {
-                $rows = Vernal_Show_Notes_Fields::rows_from_value($raw);
-            }
+        if (class_exists('Vernal_Show_Notes_Fields')) {
+            $post_id = Vernal_Show_Notes_Fields::resolve_show_post_id();
+            $rows = Vernal_Show_Notes_Fields::load_rows_for_post($post_id);
         }
         if (empty($rows)) {
             return;

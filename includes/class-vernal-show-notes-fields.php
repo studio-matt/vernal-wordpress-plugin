@@ -180,6 +180,62 @@ class Vernal_Show_Notes_Fields {
         return self::normalize_guest_link_rows($value);
     }
 
+    public static function resolve_show_post_id() {
+        $candidates = array();
+        $qid = (int) get_queried_object_id();
+        if ($qid) {
+            $candidates[] = $qid;
+        }
+        $tid = (int) get_the_ID();
+        if ($tid) {
+            $candidates[] = $tid;
+        }
+        if (class_exists('\Elementor\Plugin')) {
+            $elementor = \Elementor\Plugin::$instance;
+            if (!empty($elementor->documents)) {
+                $document = $elementor->documents->get_current();
+                if ($document && method_exists($document, 'get_settings')) {
+                    $preview = $document->get_settings('preview_id');
+                    if ($preview) {
+                        $candidates[] = (int) $preview;
+                    }
+                }
+            }
+        }
+        if (!empty($_GET['preview_id'])) {
+            $candidates[] = (int) $_GET['preview_id'];
+        }
+        foreach ($candidates as $pid) {
+            if ($pid <= 0) {
+                continue;
+            }
+            $type = get_post_type($pid);
+            if ($type && $type !== 'elementor_library' && $type !== 'elementor_font' && $type !== 'elementor_snippet') {
+                return $pid;
+            }
+        }
+        return $tid;
+    }
+
+    public static function load_rows_for_post($post_id) {
+        $post_id = (int) $post_id;
+        if ($post_id <= 0) {
+            return array();
+        }
+        $raw = function_exists('get_field') ? get_field('ih_guest_links', $post_id, false) : null;
+        $rows = self::normalize_guest_link_rows($raw);
+        if (!empty($rows)) {
+            return $rows;
+        }
+        $json = get_post_meta($post_id, 'ih_guest_links_json', true);
+        $rows = self::normalize_guest_link_rows($json);
+        if (!empty($rows)) {
+            return $rows;
+        }
+        $html = get_post_meta($post_id, 'ih_guest_links_html', true);
+        return self::normalize_guest_link_rows($html);
+    }
+
     public static function row_from_item($item) {
         $rows = self::normalize_guest_link_rows(array($item));
         return !empty($rows) ? $rows[0] : array();
