@@ -14,19 +14,6 @@ class Vernal_Guest_Link_Tags {
 
     public static function init() {
         add_action('elementor/dynamic_tags/register', array(__CLASS__, 'register'));
-        add_action('wp_enqueue_scripts', array(__CLASS__, 'enqueue_css'));
-        add_action('elementor/preview/enqueue_styles', array(__CLASS__, 'enqueue_css'));
-    }
-
-    public static function enqueue_css() {
-        $css = '.ih-guest-links{display:flex;flex-direction:column;gap:1.25rem;}'
-            . '.ih-guest-link{margin:0;}'
-            . '.ih-guest-link__name{display:block;font-weight:600;text-decoration:underline;}'
-            . '.ih-guest-link__description{margin:.35rem 0 0;opacity:.88;line-height:1.45;}';
-        $ver = defined('VERNAL_CONTENTUM_VERSION') ? VERNAL_CONTENTUM_VERSION : '1.2.24';
-        wp_register_style('vernal-guest-links', false, array(), $ver);
-        wp_enqueue_style('vernal-guest-links');
-        wp_add_inline_style('vernal-guest-links', $css);
     }
 
     public static function register($module) {

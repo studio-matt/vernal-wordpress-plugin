@@ -141,12 +141,12 @@ class Vernal_Show_Notes_Fields {
     }
 
     public static function format_guest_links_html_passthrough($value, $post_id, $field) {
-        if (is_string($value) && trim($value) !== '') {
-            return $value;
-        }
         $json = function_exists('get_field') ? get_field('ih_guest_links_json', $post_id, false) : '';
         $html = self::guest_links_to_html($json);
-        return $html !== '' ? $html : $value;
+        if ($html !== '') {
+            return $html;
+        }
+        return self::guest_links_to_html($value);
     }
 
     public static function guest_links_to_html($value) {
@@ -165,8 +165,8 @@ class Vernal_Show_Notes_Fields {
             if ($name === '') {
                 $name = $url;
             }
-            $out .= '<article class="ih-guest-link">';
-            $out .= '<a class="ih-guest-link__name" href="' . esc_url($url) . '" target="_blank" rel="noopener noreferrer">' . esc_html($name) . '</a>';
+            $out .= '<article class="ih-guest-link" style="margin:0 0 1.5em;">';
+            $out .= '<h2 class="ih-guest-link__name"><a href="' . esc_url($url) . '" target="_blank" rel="noopener noreferrer">' . esc_html($name) . '</a></h2>';
             if ($desc !== '') {
                 $out .= '<p class="ih-guest-link__description">' . esc_html($desc) . '</p>';
             }
