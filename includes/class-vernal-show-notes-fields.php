@@ -21,6 +21,8 @@ class Vernal_Show_Notes_Fields {
     public static function init() {
         add_action('acf/init', array(__CLASS__, 'register_fields'));
         add_action('init', array(__CLASS__, 'maybe_register'), 20);
+        add_filter('acf/format_value/name=ih_guest_links_json', array(__CLASS__, 'format_guest_links_json_html'), 20, 3);
+        add_filter('acf/format_value/name=ih_guest_links_html', array(__CLASS__, 'format_guest_links_html_passthrough'), 20, 3);
     }
 
     public static function maybe_register() {
@@ -75,7 +77,118 @@ class Vernal_Show_Notes_Fields {
             $base['min'] = 0;
             $base['max'] = 0;
         }
+        if ($type === 'wysiwyg') {
+            $base['tabs'] = 'visual';
+            $base['media_upload'] = 0;
+            $base['delay'] = 0;
+        }
         return $base;
+    }
+
+    /**
+     * Elementor Text Editor bound to Guest Links JSON should render a list, not raw JSON.
+     *
+     * @param mixed $value
+     * @param int   $post_id
+     * @param array $field
+     * @return mixed
+     */
+    public static function format_guest_links_json_html($value, $post_id, $field) {
+        if (is_admin() && empty($_GET['elementor-preview'])) {
+            return $value;
+        }
+        $html = self::guest_links_to_html($value);
+        return $html !== '' ? $html : $value;
+    }
+
+    public static function format_guest_links_html_passthrough($value, $post_id, $field) {
+        if (is_string($value) && trim($value) !== '') {
+            return $value;
+        }
+        $json = function_exists('get_field') ? get_field('ih_guest_links_json', $post_id, false) : '';
+        $html = self::guest_links_to_html($json);
+        return $html !== '' ? $html : $value;
+    }
+
+    public static function guest_links_to_html($value) {
+        $rows = self::normalize_guest_link_rows($value);
+        if (empty($rows)) {
+            return '';
+        }
+        $out = '<div class="ih-guest-links">';
+        foreach ($rows as $row) {
+            $name = isset($row['name']) ? $row['name'] : '';
+            $url = isset($row['url']) ? $row['url'] : '';
+            $desc = isset($row['description']) ? $row['description'] : '';
+            if ($url === '') {
+                continue;
+            }
+            if ($name === '') {
+                $name = $url;
+            }
+            $out .= '<p class="ih-guest-link">';
+            $out .= '<a href="' . esc_url($url) . '" target="_blank" rel="noopener noreferrer">' . esc_html($name) . '</a>';
+            if ($desc !== '') {
+                $out .= '<br><span class="ih-guest-link-desc">' . esc_html($desc) . '</span>';
+            }
+            $out .= '</p>';
+        }
+        $out .= '</div>';
+        return $out;
+    }
+
+    private static function normalize_guest_link_rows($value) {
+        if (is_string($value)) {
+            $trim = trim($value);
+            if ($trim === '') {
+                return array();
+            }
+            if ($trim[0] === '<') {
+                return array();
+            }
+            $decoded = json_decode($trim, true);
+            $value = is_array($decoded) ? $decoded : array();
+        }
+        if (!is_array($value)) {
+            return array();
+        }
+        $rows = array();
+        foreach ($value as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $url = '';
+            if (!empty($item['url'])) {
+                $url = esc_url_raw((string) $item['url']);
+            } elseif (!empty($item['link_url'])) {
+                $url = esc_url_raw((string) $item['link_url']);
+            }
+            if ($url === '') {
+                continue;
+            }
+            $name = '';
+            if (!empty($item['name'])) {
+                $name = sanitize_text_field((string) $item['name']);
+            } elseif (!empty($item['link_name'])) {
+                $name = sanitize_text_field((string) $item['link_name']);
+            } elseif (!empty($item['title'])) {
+                $name = sanitize_text_field((string) $item['title']);
+            }
+            $description = '';
+            if (!empty($item['description'])) {
+                $description = sanitize_textarea_field((string) $item['description']);
+            } elseif (!empty($item['link_description'])) {
+                $description = sanitize_textarea_field((string) $item['link_description']);
+            } elseif (!empty($item['snippet'])) {
+                $description = sanitize_textarea_field((string) $item['snippet']);
+            }
+            $rows[] = array(
+                'name' => $name,
+                'description' => $description,
+                'url' => $url,
+            );
+        }
+        return $rows;
     }
 
     private static function extra_fields() {
@@ -120,8 +233,17 @@ class Vernal_Show_Notes_Fields {
                 'Guest Links JSON',
                 'textarea',
                 array(
-                    'instructions' => 'Raw JSON backup of Guest Links. Prefer the Guest Links repeater for Elementor.',
+                    'instructions' => 'For Elementor Text Editor: outputs an HTML list (name, description, new-window URL). Prefer the Guest Links repeater for Loop widgets.',
                     'rows' => 3,
+                )
+            ),
+            self::field(
+                'field_ih_guest_links_html',
+                'ih_guest_links_html',
+                'Guest Links HTML',
+                'wysiwyg',
+                array(
+                    'instructions' => 'Ready-to-render Guest Links list. Bind a Text Editor or HTML widget to this if you are not using a Repeater.',
                 )
             ),
             self::field('field_ih_personal_website', 'ih_personal_website', 'Personal Website', 'url', array(

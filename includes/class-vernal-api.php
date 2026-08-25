@@ -1069,7 +1069,7 @@ class Vernal_API {
             'ih_guests_name', 'ih_guest_name', 'ih_personal_website', 'ih_podcast',
             'ih_misc_link', 'ih_misc_label', 'ih_their_offer', 'ih_amazon', 'ih_instagram', 'ih_youtube',
             'ih_facebook', 'ih_linkedin', 'ih_twitter', 'ih_tiktok',
-            'ih_guest_links', 'ih_guest_links_json',
+            'ih_guest_links', 'ih_guest_links_json', 'ih_guest_links_html',
             'ih_youtube_link', 'ih_show_summary',
             'ih_transcript', 'ih_guest_headshot', 'ih_guest_bio', 'shirt_prints',
             'shirt_prints_json', 'shirt_prints_back', 'shirt_prints_back_json',
@@ -1434,10 +1434,14 @@ class Vernal_API {
                 continue;
             }
 
-            if ($target_key === 'ih_guest_links' || $target_key === 'ih_guest_links_json') {
+            if ($target_key === 'ih_guest_links' || $target_key === 'ih_guest_links_json' || $target_key === 'ih_guest_links_html') {
                 $rows = $this->normalize_guest_links_rows($value);
                 $this->set_acf_or_meta($post_id, 'ih_guest_links', $rows);
                 $this->set_acf_or_meta($post_id, 'ih_guest_links_json', wp_json_encode($rows));
+                $html = class_exists('Vernal_Show_Notes_Fields')
+                    ? Vernal_Show_Notes_Fields::guest_links_to_html($rows)
+                    : '';
+                $this->set_acf_or_meta($post_id, 'ih_guest_links_html', $html);
                 continue;
             }
 
