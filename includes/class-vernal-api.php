@@ -1067,8 +1067,10 @@ class Vernal_API {
         $post_id = intval($post->ID);
         $acf_keys = array(
             'ih_guests_name', 'ih_guest_name', 'ih_personal_website', 'ih_podcast',
-            'ih_misc_link', 'ih_their_offer', 'ih_amazon', 'ih_instagram', 'ih_youtube',
-            'ih_facebook', 'ih_linkedin', 'ih_youtube_link', 'ih_show_summary',
+            'ih_misc_link', 'ih_misc_label', 'ih_their_offer', 'ih_amazon', 'ih_instagram', 'ih_youtube',
+            'ih_facebook', 'ih_linkedin', 'ih_twitter', 'ih_tiktok',
+            'ih_guest_links', 'ih_guest_links_json',
+            'ih_youtube_link', 'ih_show_summary',
             'ih_transcript', 'ih_guest_headshot', 'ih_guest_bio', 'shirt_prints',
             'shirt_prints_json', 'shirt_prints_back', 'shirt_prints_back_json',
             'shirt_front', 'shirt_back', 'thumbnail',
@@ -1432,8 +1434,65 @@ class Vernal_API {
                 continue;
             }
 
+            if ($target_key === 'ih_guest_links' || $target_key === 'ih_guest_links_json') {
+                $rows = $this->normalize_guest_links_rows($value);
+                $this->set_acf_or_meta($post_id, 'ih_guest_links', $rows);
+                $this->set_acf_or_meta($post_id, 'ih_guest_links_json', wp_json_encode($rows));
+                continue;
+            }
+
             $this->set_acf_or_meta($post_id, $target_key, $value);
         }
+    }
+
+    /**
+     * Normalize Machine guest-link payload into ACF repeater rows.
+     *
+     * @param mixed $value
+     * @return array
+     */
+    private function normalize_guest_links_rows($value) {
+        if (is_string($value)) {
+            $decoded = json_decode($value, true);
+            $value = is_array($decoded) ? $decoded : array();
+        }
+        if (!is_array($value)) {
+            return array();
+        }
+        $rows = array();
+        foreach ($value as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $url = isset($item['url']) ? esc_url_raw((string) $item['url']) : '';
+            if ($url === '' && isset($item['link_url'])) {
+                $url = esc_url_raw((string) $item['link_url']);
+            }
+            if ($url === '') {
+                continue;
+            }
+            $name = isset($item['name']) ? sanitize_text_field((string) $item['name']) : '';
+            if ($name === '' && isset($item['link_name'])) {
+                $name = sanitize_text_field((string) $item['link_name']);
+            }
+            if ($name === '' && isset($item['title'])) {
+                $name = sanitize_text_field((string) $item['title']);
+            }
+            $description = '';
+            if (!empty($item['description'])) {
+                $description = sanitize_textarea_field((string) $item['description']);
+            } elseif (!empty($item['link_description'])) {
+                $description = sanitize_textarea_field((string) $item['link_description']);
+            } elseif (!empty($item['snippet'])) {
+                $description = sanitize_textarea_field((string) $item['snippet']);
+            }
+            $rows[] = array(
+                'link_name' => $name !== '' ? $name : $url,
+                'link_description' => $description,
+                'link_url' => $url,
+            );
+        }
+        return $rows;
     }
 
     /**
