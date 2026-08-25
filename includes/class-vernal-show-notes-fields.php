@@ -82,6 +82,12 @@ class Vernal_Show_Notes_Fields {
             $base['media_upload'] = 0;
             $base['delay'] = 0;
         }
+        if ($type === 'true_false') {
+            $base['ui'] = 1;
+            $base['ui_on_text'] = 'Yes';
+            $base['ui_off_text'] = 'No';
+            $base['default_value'] = 0;
+        }
         return $base;
     }
 
@@ -244,6 +250,15 @@ class Vernal_Show_Notes_Fields {
                 'wysiwyg',
                 array(
                     'instructions' => 'Ready-to-render Guest Links list. Bind a Text Editor or HTML widget to this if you are not using a Repeater.',
+                )
+            ),
+            self::field(
+                'field_ih_has_guest_links',
+                'ih_has_guest_links',
+                'Has Guest Links',
+                'true_false',
+                array(
+                    'instructions' => 'Use this in Elementor Display Conditions (Is not empty / is True). The Guest Links repeater will not appear in that picker.',
                 )
             ),
             self::field('field_ih_personal_website', 'ih_personal_website', 'Personal Website', 'url', array(

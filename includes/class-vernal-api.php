@@ -1442,6 +1442,7 @@ class Vernal_API {
                     ? Vernal_Show_Notes_Fields::guest_links_to_html($rows)
                     : '';
                 $this->set_acf_or_meta($post_id, 'ih_guest_links_html', $html);
+                $this->set_acf_or_meta($post_id, 'ih_has_guest_links', !empty($rows) ? 1 : 0);
                 continue;
             }
 
