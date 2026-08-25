@@ -23,6 +23,9 @@ class Vernal_Show_Notes_Fields {
         add_action('init', array(__CLASS__, 'maybe_register'), 20);
         add_filter('acf/format_value/name=ih_guest_links_json', array(__CLASS__, 'format_guest_links_json_html'), 20, 3);
         add_filter('acf/format_value/name=ih_guest_links_html', array(__CLASS__, 'format_guest_links_html_passthrough'), 20, 3);
+        add_filter('acf/load_value/name=ih_guest_link_name', array(__CLASS__, 'load_current_row_name'), 20, 3);
+        add_filter('acf/load_value/name=ih_guest_link_description', array(__CLASS__, 'load_current_row_description'), 20, 3);
+        add_filter('acf/load_value/name=ih_guest_link_url', array(__CLASS__, 'load_current_row_url'), 20, 3);
     }
 
     public static function maybe_register() {
@@ -105,6 +108,36 @@ class Vernal_Show_Notes_Fields {
         }
         $html = self::guest_links_to_html($value);
         return $html !== '' ? $html : $value;
+    }
+
+    public static function load_current_row_name($value, $post_id, $field) {
+        if (class_exists('Vernal_Guest_Link_Tags')) {
+            $row = Vernal_Guest_Link_Tags::current_row();
+            if (!empty($row['name'])) {
+                return $row['name'];
+            }
+        }
+        return $value;
+    }
+
+    public static function load_current_row_description($value, $post_id, $field) {
+        if (class_exists('Vernal_Guest_Link_Tags')) {
+            $row = Vernal_Guest_Link_Tags::current_row();
+            if (!empty($row['description'])) {
+                return $row['description'];
+            }
+        }
+        return $value;
+    }
+
+    public static function load_current_row_url($value, $post_id, $field) {
+        if (class_exists('Vernal_Guest_Link_Tags')) {
+            $row = Vernal_Guest_Link_Tags::current_row();
+            if (!empty($row['url'])) {
+                return $row['url'];
+            }
+        }
+        return $value;
     }
 
     public static function format_guest_links_html_passthrough($value, $post_id, $field) {
@@ -268,6 +301,34 @@ class Vernal_Show_Notes_Fields {
                 'true_false',
                 array(
                     'instructions' => 'Use this in Elementor Display Conditions (Is not empty / is True). The Guest Links repeater will not appear in that picker.',
+                )
+            ),
+            self::field(
+                'field_ih_guest_link_name',
+                'ih_guest_link_name',
+                'Guest Link Name (this row)',
+                'text',
+                array(
+                    'instructions' => 'Loop item only. Bind this in a Loop whose source is Guest Links (ih_guest_links).',
+                )
+            ),
+            self::field(
+                'field_ih_guest_link_description',
+                'ih_guest_link_description',
+                'Guest Link Description (this row)',
+                'textarea',
+                array(
+                    'instructions' => 'Loop item only. Description/snippet for the current Guest Links row.',
+                    'rows' => 2,
+                )
+            ),
+            self::field(
+                'field_ih_guest_link_url',
+                'ih_guest_link_url',
+                'Guest Link URL (this row)',
+                'url',
+                array(
+                    'instructions' => 'Loop item only. Set the widget link to this field and Open in new window.',
                 )
             ),
             self::field('field_ih_personal_website', 'ih_personal_website', 'Personal Website', 'url', array(
