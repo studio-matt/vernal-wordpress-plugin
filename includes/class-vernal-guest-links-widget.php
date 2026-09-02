@@ -29,8 +29,12 @@ class Vernal_Guest_Links_Widget_Loader {
             return;
         }
         require_once __DIR__ . '/widget-vernal-guest-links.php';
-        if (class_exists('Vernal_Guest_Links_Widget')) {
-            $widgets_manager->register(new Vernal_Guest_Links_Widget());
+        require_once __DIR__ . '/widget-vernal-guest-card.php';
+        require_once __DIR__ . '/widget-vernal-show-gallery.php';
+        foreach (array('Vernal_Guest_Links_Widget', 'Vernal_Guest_Card_Widget', 'Vernal_Show_Gallery_Widget') as $class) {
+            if (class_exists($class)) {
+                $widgets_manager->register(new $class());
+            }
         }
     }
 }

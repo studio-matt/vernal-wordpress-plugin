@@ -3,7 +3,7 @@
  * Plugin Name: Vernal Contentum Bridge
  * Plugin URI: https://vernalcontentum.com
  * Description: Bridge between WordPress and Vernal Contentum web app for content creation and management
- * Version: 1.3.0
+ * Version: 1.3.1
  * Author: Vernal Contentum
  * License: GPL v2 or later
  * Text Domain: vernal-contentum
@@ -17,7 +17,7 @@ if (!defined('ABSPATH')) {
 }
 
 // Define plugin constants
-define('VERNAL_CONTENTUM_VERSION', '1.3.0');
+define('VERNAL_CONTENTUM_VERSION', '1.3.1');
 define('VERNAL_CONTENTUM_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('VERNAL_CONTENTUM_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('VERNAL_CONTENTUM_PLUGIN_BASENAME', plugin_basename(__FILE__));
@@ -62,8 +62,16 @@ require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-settings.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-code-fields.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-partner-fields.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-show-notes-fields.php';
-require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-modules.php';
-require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-template-stamp.php';
+$vernal_optional_includes = array(
+    'includes/class-vernal-modules.php',
+    'includes/class-vernal-template-stamp.php',
+);
+foreach ($vernal_optional_includes as $vernal_rel) {
+    $vernal_path = VERNAL_CONTENTUM_PLUGIN_DIR . $vernal_rel;
+    if (file_exists($vernal_path)) {
+        require_once $vernal_path;
+    }
+}
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-guest-link-tags.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-guest-links-widget.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-semantic-content.php';
@@ -72,8 +80,16 @@ require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-api.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-backend-api.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-sitemap.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-schema.php';
-require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-internal-link-inserter.php';
-require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-internal-links.php';
+$vernal_il_includes = array(
+    'includes/class-vernal-internal-link-inserter.php',
+    'includes/class-vernal-internal-links.php',
+);
+foreach ($vernal_il_includes as $vernal_rel) {
+    $vernal_path = VERNAL_CONTENTUM_PLUGIN_DIR . $vernal_rel;
+    if (file_exists($vernal_path)) {
+        require_once $vernal_path;
+    }
+}
 
 /**
  * Main plugin class
@@ -111,7 +127,9 @@ class Vernal_Contentum {
         Vernal_Schema::get_instance();
 
         // Internal cross-article linking (cron + inserter orchestration)
-        Vernal_Internal_Links::get_instance();
+        if (class_exists('Vernal_Internal_Links')) {
+            Vernal_Internal_Links::get_instance();
+        }
         
         // Activation/Deactivation hooks
         register_activation_hook(__FILE__, array($this, 'activate'));
