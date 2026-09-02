@@ -132,10 +132,37 @@ class Vernal_API {
             ),
         ));
 
+        register_rest_route($namespace, '/modules', array(
+            'methods' => 'GET',
+            'callback' => array($this, 'list_modules'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+
+        register_rest_route($namespace, '/templates/ensure-widgets', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'ensure_template_widgets'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+
         // Update Show Notes ACF on an existing landing post (API key; bypasses wp/v2 edit caps)
         register_rest_route($namespace, '/posts/(?P<id>\d+)/show-notes', array(
             'methods' => 'POST',
             'callback' => array($this, 'update_show_notes'),
+            'permission_callback' => array($this, 'check_api_key'),
+            'args' => array(
+                'id' => array(
+                    'required' => true,
+                    'validate_callback' => function ($param) {
+                        return is_numeric($param);
+                    },
+                ),
+            ),
+        ));
+
+        // Enqueue internal linking for a published article (convenience; cron remains authoritative)
+        register_rest_route($namespace, '/posts/(?P<id>\d+)/internal-links/enqueue', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'enqueue_internal_links'),
             'permission_callback' => array($this, 'check_api_key'),
             'args' => array(
                 'id' => array(
@@ -718,6 +745,43 @@ class Vernal_API {
      * When preserve_publication is true (retrofit): never change status, slug, author,
      * post_date*, or a valid existing PowerPress enclosure.
      */
+    /**
+     * Enqueue a post for internal linking (Machine → WP convenience nudge).
+     */
+    public function enqueue_internal_links($request) {
+        $post_id = intval($request['id']);
+        if (!class_exists('Vernal_Internal_Links')) {
+            return new WP_Error(
+                'unavailable',
+                __('Internal linking module not loaded', 'vernal-contentum'),
+                array('status' => 500)
+            );
+        }
+        $result = Vernal_Internal_Links::get_instance()->enqueue_post($post_id);
+        $run_now = false;
+        $params = $request->get_json_params();
+        if (is_array($params) && !empty($params['run_now'])) {
+            // Optional immediate focused pass (still respects lock)
+            $summary = Vernal_Internal_Links::get_instance()->run_pass('enqueue', array(
+                'focus_post_ids' => array($post_id),
+            ));
+            $run_now = true;
+            return rest_ensure_response(array(
+                'success'  => true,
+                'enqueued' => !empty($result['enqueued']),
+                'post_id'  => $post_id,
+                'run_now'  => $run_now,
+                'run'      => $summary,
+            ));
+        }
+        return rest_ensure_response(array(
+            'success'  => true,
+            'enqueued' => !empty($result['enqueued']),
+            'post_id'  => $post_id,
+            'reason'   => isset($result['reason']) ? $result['reason'] : '',
+        ));
+    }
+
     public function update_show_notes($request) {
         $post_id = intval($request['id']);
         $post = get_post($post_id);
@@ -1376,6 +1440,8 @@ class Vernal_API {
             'ih_partner_gallery',
             'field_ih_partner_gallery',
             'partner_gallery',
+            'ih_show_gallery',
+            'field_ih_show_gallery',
         );
         foreach ($acf as $key => $value) {
             $key = is_string($key) ? $key : '';
@@ -1812,13 +1878,40 @@ class Vernal_API {
                     'max_upload_bytes' => $max_upload,
                     'allowed_mime_types' => array_values(get_allowed_mime_types()),
                 ),
+                'elementor_active' => class_exists('\Elementor\Plugin'),
+                'widgets' => class_exists('Vernal_Modules') ? Vernal_Modules::catalog() : array(),
                 'capabilities' => array(
                     'media' => true,
                     'code_fields' => true,
                     'configure_backend' => true,
+                    'modules' => true,
+                    'template_stamp' => true,
                 ),
             ),
         ));
+    }
+
+    public function list_modules($request) {
+        return rest_ensure_response(array(
+            'success' => true,
+            'data' => array(
+                'plugin_version' => defined('VERNAL_CONTENTUM_VERSION') ? VERNAL_CONTENTUM_VERSION : '',
+                'elementor_active' => class_exists('\Elementor\Plugin'),
+                'acf_active' => function_exists('acf_add_local_field_group') || class_exists('ACF'),
+                'widgets' => class_exists('Vernal_Modules') ? Vernal_Modules::catalog() : array(),
+            ),
+        ));
+    }
+
+    public function ensure_template_widgets($request) {
+        if (!class_exists('Vernal_Template_Stamp')) {
+            return new WP_Error(
+                'missing_stamp',
+                __('Template stamp helper is not loaded', 'vernal-contentum'),
+                array('status' => 500)
+            );
+        }
+        return Vernal_Template_Stamp::ensure($request);
     }
 
     public function search_media($request) {

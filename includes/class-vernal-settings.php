@@ -87,6 +87,22 @@ class Vernal_Settings {
             'vernal-contentum-show-retrofit',
             array($this, 'render_show_retrofit_page')
         );
+
+        // Submenu: Internal Linking (SEO finisher)
+        add_submenu_page(
+            'vernal-contentum',
+            __('Internal Linking', 'vernal-contentum'),
+            __('Internal Linking', 'vernal-contentum'),
+            'manage_options',
+            'vernal-contentum-internal-links',
+            array($this, 'render_internal_links_page')
+        );
+    }
+
+    public function render_internal_links_page() {
+        if (class_exists('Vernal_Internal_Links')) {
+            Vernal_Internal_Links::get_instance()->render_admin_page();
+        }
     }
     
     public function register_settings() {
