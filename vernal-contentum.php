@@ -3,12 +3,12 @@
  * Plugin Name: Vernal Contentum Bridge
  * Plugin URI: https://vernalcontentum.com
  * Description: Bridge between WordPress and Vernal Contentum web app for content creation and management
- * Version: 1.4.0
+ * Version: 1.5.0
  * Author: Vernal Contentum
  * License: GPL v2 or later
  * Text Domain: vernal-contentum
  *
- * Last updated: Topic graph internal link optimizer (best missing edge).
+ * Last updated: RAG category exclusions (WP source of truth).
  */
 
 // Exit if accessed directly
@@ -17,7 +17,7 @@ if (!defined('ABSPATH')) {
 }
 
 // Define plugin constants
-define('VERNAL_CONTENTUM_VERSION', '1.4.0');
+define('VERNAL_CONTENTUM_VERSION', '1.5.0');
 define('VERNAL_CONTENTUM_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('VERNAL_CONTENTUM_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('VERNAL_CONTENTUM_PLUGIN_BASENAME', plugin_basename(__FILE__));
@@ -90,6 +90,16 @@ foreach ($vernal_il_includes as $vernal_rel) {
         require_once $vernal_path;
     }
 }
+$vernal_rag_includes = array(
+    'includes/class-vernal-rag-eligibility.php',
+    'includes/class-vernal-rag-admin.php',
+);
+foreach ($vernal_rag_includes as $vernal_rel) {
+    $vernal_path = VERNAL_CONTENTUM_PLUGIN_DIR . $vernal_rel;
+    if (file_exists($vernal_path)) {
+        require_once $vernal_path;
+    }
+}
 
 /**
  * Main plugin class
@@ -129,6 +139,9 @@ class Vernal_Contentum {
         // Internal cross-article linking (cron + inserter orchestration)
         if (class_exists('Vernal_Internal_Links')) {
             Vernal_Internal_Links::get_instance();
+        }
+        if (class_exists('Vernal_Rag_Admin')) {
+            Vernal_Rag_Admin::get_instance();
         }
         
         // Activation/Deactivation hooks

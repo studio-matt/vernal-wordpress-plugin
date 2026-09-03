@@ -668,13 +668,14 @@ class Vernal_Internal_Links {
 
         $stubs = $this->build_candidate_stubs($settings, 40, array( (int) $new_post->ID ));
         $payload = array(
-            'mode'                   => 'inbound_sources',
-            'social_destination_id'  => (int) $dest_id,
-            'strategy'               => 'new_post_inbound_backfill',
-            'limit'                  => $max * 3,
-            'min_score'              => (float) $settings['min_relevance_score'],
-            'target'                 => $this->post_to_match_source($new_post),
-            'candidate_stubs'        => $stubs,
+            'mode'                      => 'inbound_sources',
+            'social_destination_id'     => (int) $dest_id,
+            'strategy'                  => 'new_post_inbound_backfill',
+            'limit'                     => $max * 3,
+            'min_score'                 => (float) $settings['min_relevance_score'],
+            'target'                    => $this->post_to_match_source($new_post),
+            'candidate_stubs'           => $stubs,
+            'rag_excluded_category_ids' => $this->rag_excluded_category_ids_for_match(),
         );
         $resp = Vernal_Backend_API::request('plugin/internal-links/match', array(
             'method' => 'POST',
@@ -774,18 +775,26 @@ class Vernal_Internal_Links {
         return '';
     }
 
+    private function rag_excluded_category_ids_for_match() {
+        if (class_exists('Vernal_Rag_Eligibility')) {
+            return Vernal_Rag_Eligibility::get_excluded_category_ids();
+        }
+        return array();
+    }
+
     private function build_outbound_match_payload($post, $settings, $dest_id, $analysis, $strategy, $limit) {
         $inbound_counts = $this->estimate_inbound_counts($settings);
         return array(
-            'mode'                      => 'outbound_candidates',
-            'social_destination_id'     => (int) $dest_id,
-            'strategy'                  => $strategy,
-            'limit'                     => (int) $limit,
-            'min_score'                 => (float) $settings['min_relevance_score'],
-            'source'                    => $this->post_to_match_source($post),
-            'already_linked_target_ids' => $analysis['target_ids'],
-            'inbound_counts'            => $inbound_counts,
-            'candidate_stubs'           => $this->build_candidate_stubs($settings, 40, array( (int) $post->ID )),
+            'mode'                       => 'outbound_candidates',
+            'social_destination_id'      => (int) $dest_id,
+            'strategy'                   => $strategy,
+            'limit'                      => (int) $limit,
+            'min_score'                  => (float) $settings['min_relevance_score'],
+            'source'                     => $this->post_to_match_source($post),
+            'already_linked_target_ids'  => $analysis['target_ids'],
+            'inbound_counts'             => $inbound_counts,
+            'candidate_stubs'            => $this->build_candidate_stubs($settings, 40, array( (int) $post->ID )),
+            'rag_excluded_category_ids'  => $this->rag_excluded_category_ids_for_match(),
         );
     }
 
@@ -804,18 +813,19 @@ class Vernal_Internal_Links {
             $source['cluster_role'] = 'pillar';
         }
         return array(
-            'mode'                      => 'best_missing_edge',
-            'social_destination_id'     => (int) $dest_id,
-            'min_score'                 => (float) $settings['min_relevance_score'],
-            'source'                    => $source,
-            'already_linked_target_ids' => $analysis['target_ids'],
-            'inbound_counts'            => $inbound_counts,
-            'slots_filled'              => $slots,
-            'used_anchor_texts'         => $this->used_anchor_texts_from_ledger($ledger),
-            'soft_max'                  => (int) $profile['soft_max'],
-            'vernal_links_out'          => (int) $analysis['vernal'],
-            'candidate_stubs'           => $this->build_candidate_stubs($settings, 40, array( (int) $post->ID )),
-            'graph_stats'               => $stats,
+            'mode'                       => 'best_missing_edge',
+            'social_destination_id'      => (int) $dest_id,
+            'min_score'                  => (float) $settings['min_relevance_score'],
+            'source'                     => $source,
+            'already_linked_target_ids'  => $analysis['target_ids'],
+            'inbound_counts'             => $inbound_counts,
+            'slots_filled'               => $slots,
+            'used_anchor_texts'          => $this->used_anchor_texts_from_ledger($ledger),
+            'soft_max'                   => (int) $profile['soft_max'],
+            'vernal_links_out'           => (int) $analysis['vernal'],
+            'candidate_stubs'            => $this->build_candidate_stubs($settings, 40, array( (int) $post->ID )),
+            'graph_stats'                => $stats,
+            'rag_excluded_category_ids'  => $this->rag_excluded_category_ids_for_match(),
         );
     }
 

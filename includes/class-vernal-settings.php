@@ -97,11 +97,27 @@ class Vernal_Settings {
             'vernal-contentum-internal-links',
             array($this, 'render_internal_links_page')
         );
+
+        // Submenu: RAG Ingestion exclusions
+        add_submenu_page(
+            'vernal-contentum',
+            __('RAG Ingestion', 'vernal-contentum'),
+            __('RAG Ingestion', 'vernal-contentum'),
+            'manage_options',
+            'vernal-contentum-rag',
+            array($this, 'render_rag_page')
+        );
     }
 
     public function render_internal_links_page() {
         if (class_exists('Vernal_Internal_Links')) {
             Vernal_Internal_Links::get_instance()->render_admin_page();
+        }
+    }
+
+    public function render_rag_page() {
+        if (class_exists('Vernal_Rag_Admin')) {
+            Vernal_Rag_Admin::get_instance()->render_admin_page();
         }
     }
     

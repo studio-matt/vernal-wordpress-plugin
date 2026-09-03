@@ -105,6 +105,33 @@ class Vernal_API {
             'permission_callback' => array($this, 'check_api_key'),
         ));
 
+        // RAG exclusions (WP is source of truth)
+        register_rest_route($namespace, '/rag/exclusions', array(
+            'methods' => 'GET',
+            'callback' => array($this, 'get_rag_exclusions'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+        register_rest_route($namespace, '/rag/exclusions', array(
+            'methods' => 'PUT',
+            'callback' => array($this, 'put_rag_exclusions'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+        register_rest_route($namespace, '/rag/exclusions/categories', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'post_rag_exclusion_category'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+        register_rest_route($namespace, '/rag/exclusions/categories/(?P<id>\d+)', array(
+            'methods' => 'DELETE',
+            'callback' => array($this, 'delete_rag_exclusion_category'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+        register_rest_route($namespace, '/rag/posts', array(
+            'methods' => 'GET',
+            'callback' => array($this, 'get_rag_posts'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+
         register_rest_route($namespace, '/posts/(?P<id>\d+)/code-fields', array(
             'methods' => 'GET',
             'callback' => array($this, 'get_code_fields'),
@@ -2031,6 +2058,78 @@ class Vernal_API {
             return $result;
         }
         return rest_ensure_response(array('success' => true, 'data' => $result));
+    }
+
+    public function get_rag_exclusions($request) {
+        if (!class_exists('Vernal_Rag_Eligibility')) {
+            return new WP_Error('missing', 'RAG module missing', array('status' => 500));
+        }
+        return rest_ensure_response(Vernal_Rag_Eligibility::get_exclusions_payload());
+    }
+
+    public function put_rag_exclusions($request) {
+        if (!class_exists('Vernal_Rag_Eligibility')) {
+            return new WP_Error('missing', 'RAG module missing', array('status' => 500));
+        }
+        $params = $request->get_json_params();
+        if (!is_array($params)) {
+            return new WP_Error('invalid', 'JSON body required', array('status' => 400));
+        }
+        $ids = isset($params['excluded_category_ids']) ? $params['excluded_category_ids'] : array();
+        $result = Vernal_Rag_Eligibility::replace_excluded_categories($ids);
+        if (is_wp_error($result)) {
+            return $result;
+        }
+        $payload = Vernal_Rag_Eligibility::get_exclusions_payload();
+        $result['categories'] = $payload['categories'];
+        return rest_ensure_response($result);
+    }
+
+    public function post_rag_exclusion_category($request) {
+        if (!class_exists('Vernal_Rag_Eligibility')) {
+            return new WP_Error('missing', 'RAG module missing', array('status' => 500));
+        }
+        $params = $request->get_json_params();
+        if (!is_array($params)) {
+            $params = array();
+        }
+        $cid = isset($params['category_id']) ? (int) $params['category_id'] : 0;
+        $result = Vernal_Rag_Eligibility::add_excluded_category($cid);
+        if (is_wp_error($result)) {
+            return $result;
+        }
+        $payload = Vernal_Rag_Eligibility::get_exclusions_payload();
+        $result['categories'] = $payload['categories'];
+        return rest_ensure_response($result);
+    }
+
+    public function delete_rag_exclusion_category($request) {
+        if (!class_exists('Vernal_Rag_Eligibility')) {
+            return new WP_Error('missing', 'RAG module missing', array('status' => 500));
+        }
+        $cid = isset($request['id']) ? (int) $request['id'] : 0;
+        $result = Vernal_Rag_Eligibility::remove_excluded_category($cid);
+        if (is_wp_error($result)) {
+            return $result;
+        }
+        $payload = Vernal_Rag_Eligibility::get_exclusions_payload();
+        $result['categories'] = $payload['categories'];
+        return rest_ensure_response($result);
+    }
+
+    public function get_rag_posts($request) {
+        $include_excluded = (string) $request->get_param('include_excluded') === '1'
+            || $request->get_param('include_excluded') === true
+            || (int) $request->get_param('include_excluded') === 1;
+        $category_id = (int) $request->get_param('category_id');
+        if ($include_excluded && $category_id < 1) {
+            return new WP_Error(
+                'invalid',
+                'category_id is required when include_excluded=1',
+                array('status' => 400)
+            );
+        }
+        return Vernal_Rag_Admin::rest_list_posts($request);
     }
 }
 
