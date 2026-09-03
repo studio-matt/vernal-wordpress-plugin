@@ -951,6 +951,62 @@ class Vernal_Internal_Links {
         exit;
     }
 
+    /**
+     * Render one settings row with optional help + impact text.
+     *
+     * @param string $label
+     * @param string $field_html
+     * @param string $help Plain-language description.
+     * @param string $impact Higher/lower guidance (optional).
+     */
+    private function render_settings_row($label, $field_html, $help = '', $impact = '') {
+        echo '<tr>';
+        echo '<th scope="row"><label>' . esc_html($label) . '</label></th>';
+        echo '<td>';
+        echo $field_html; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped by caller
+        if ($help !== '') {
+            echo '<p class="description">' . esc_html($help) . '</p>';
+        }
+        if ($impact !== '') {
+            echo '<p class="description" style="margin-top:6px;"><em>' . esc_html($impact) . '</em></p>';
+        }
+        echo '</td>';
+        echo '</tr>';
+    }
+
+    /**
+     * Human label for a stored strategy code.
+     *
+     * @param string $strategy
+     * @return string
+     */
+    private function humanize_strategy_label($strategy) {
+        $map = array(
+            'new_post_outbound'         => __('New article linked out to others', 'vernal-contentum'),
+            'new_post_inbound_backfill' => __('Older article linked to new one', 'vernal-contentum'),
+            'orphan_repair'             => __('Catch-up on article with no links yet', 'vernal-contentum'),
+            'manual_run'                => __('Added during a manual run', 'vernal-contentum'),
+        );
+        return isset($map[$strategy]) ? $map[$strategy] : (string) $strategy;
+    }
+
+    /**
+     * Human label for last-run status.
+     *
+     * @param string $status
+     * @return string
+     */
+    private function humanize_run_status($status) {
+        $map = array(
+            'completed'     => __('Finished successfully', 'vernal-contentum'),
+            'running'       => __('Still running', 'vernal-contentum'),
+            'error'         => __('Stopped with errors', 'vernal-contentum'),
+            'disabled'      => __('Automatic linking is turned off', 'vernal-contentum'),
+            'skipped_locked'=> __('Skipped — another run was already in progress', 'vernal-contentum'),
+        );
+        return isset($map[$status]) ? $map[$status] : (string) $status;
+    }
+
     public function render_admin_page() {
         if (!current_user_can('manage_options')) {
             return;
@@ -962,126 +1018,344 @@ class Vernal_Internal_Links {
             $recent = array();
         }
         $lock = get_option(self::OPTION_LOCK, null);
+        $schedule_labels = array(
+            'hourly'     => __('Every hour', 'vernal-contentum'),
+            'twicedaily' => __('Twice a day', 'vernal-contentum'),
+            'daily'      => __('Once a day', 'vernal-contentum'),
+            'weekly'     => __('Once a week', 'vernal-contentum'),
+        );
+        $dest_missing = empty($settings['social_destination_id']);
         ?>
-        <div class="wrap">
-            <h1><?php esc_html_e('Internal Linking', 'vernal-contentum'); ?></h1>
-            <p><?php esc_html_e('Contextual in-body links between articles. Machine ranks candidates; WordPress inserts safely. Related-news Query Loops are unchanged.', 'vernal-contentum'); ?></p>
+        <div class="wrap vernal-il-settings">
+            <h1><?php esc_html_e('Article Linking', 'vernal-contentum'); ?></h1>
+            <p class="description" style="font-size:14px;max-width:820px;">
+                <?php esc_html_e('This tool adds helpful links inside your blog posts — pointing readers to other related articles on your site. It runs on a schedule (or when you click Run now). It does not change related-news blocks, show pages, or SEO plugin settings.', 'vernal-contentum'); ?>
+            </p>
+
+            <?php if ($dest_missing) : ?>
+                <div class="notice notice-warning">
+                    <p>
+                        <strong><?php esc_html_e('Setup needed:', 'vernal-contentum'); ?></strong>
+                        <?php esc_html_e('Enter your Vernal WordPress site ID below before automatic linking can work. Ask your Vernal admin or check WordPress destinations in Vernal if you are not sure of the number.', 'vernal-contentum'); ?>
+                    </p>
+                </div>
+            <?php endif; ?>
 
             <?php if (!empty($_GET['settings-updated'])) : ?>
                 <div class="notice notice-success is-dismissible"><p><?php esc_html_e('Settings saved.', 'vernal-contentum'); ?></p></div>
             <?php endif; ?>
             <?php if (!empty($_GET['vernal_il_done'])) : ?>
-                <div class="notice notice-success is-dismissible"><p><?php esc_html_e('Run finished.', 'vernal-contentum'); ?> <?php echo esc_html(isset($_GET['status']) ? (string) $_GET['status'] : ''); ?></p></div>
+                <div class="notice notice-success is-dismissible"><p><?php esc_html_e('Manual run finished.', 'vernal-contentum'); ?> <?php echo esc_html(isset($_GET['status']) ? (string) $_GET['status'] : ''); ?></p></div>
             <?php endif; ?>
             <?php if (!empty($_GET['vernal_il_undone'])) : ?>
-                <div class="notice notice-success is-dismissible"><p><?php esc_html_e('Link undone.', 'vernal-contentum'); ?></p></div>
+                <div class="notice notice-success is-dismissible"><p><?php esc_html_e('That link was removed. The text in the article was kept.', 'vernal-contentum'); ?></p></div>
             <?php endif; ?>
 
-            <div style="background:#fff;border:1px solid #ccd0d4;padding:16px;margin:16px 0;">
-                <h2><?php esc_html_e('Last run', 'vernal-contentum'); ?></h2>
+            <div style="background:#fff;border:1px solid #ccd0d4;padding:16px 20px;margin:20px 0;max-width:920px;">
+                <h2 style="margin-top:0;"><?php esc_html_e('Latest activity', 'vernal-contentum'); ?></h2>
                 <?php if (is_array($last) && !empty($last['run_id'])) : ?>
-                    <p>
-                        <strong><?php esc_html_e('Status:', 'vernal-contentum'); ?></strong> <?php echo esc_html($last['status'] ?? ''); ?>
-                        &nbsp;|&nbsp; <?php esc_html_e('Scanned', 'vernal-contentum'); ?>: <?php echo (int) ($last['scanned'] ?? 0); ?>
-                        &nbsp;|&nbsp; <?php esc_html_e('Linked', 'vernal-contentum'); ?>: <?php echo (int) ($last['linked'] ?? 0); ?>
-                        &nbsp;|&nbsp; <?php esc_html_e('Skipped', 'vernal-contentum'); ?>: <?php echo (int) ($last['skipped'] ?? 0); ?>
-                        &nbsp;|&nbsp; <?php esc_html_e('Errors', 'vernal-contentum'); ?>: <?php echo (int) ($last['errors'] ?? 0); ?>
+                    <p style="font-size:14px;">
+                        <strong><?php esc_html_e('Result:', 'vernal-contentum'); ?></strong>
+                        <?php echo esc_html($this->humanize_run_status((string) ($last['status'] ?? ''))); ?>
                     </p>
-                    <p><code><?php echo esc_html($last['run_id']); ?></code> — <?php echo esc_html($last['completed_at'] ?? $last['started_at'] ?? ''); ?></p>
+                    <ul style="list-style:disc;margin-left:18px;font-size:14px;">
+                        <li><?php echo esc_html(sprintf(__('Articles checked: %d', 'vernal-contentum'), (int) ($last['scanned'] ?? 0))); ?></li>
+                        <li><?php echo esc_html(sprintf(__('Links added: %d', 'vernal-contentum'), (int) ($last['linked'] ?? 0))); ?></li>
+                        <li><?php echo esc_html(sprintf(__('Skipped (no good match or already linked): %d', 'vernal-contentum'), (int) ($last['skipped'] ?? 0))); ?></li>
+                        <li><?php echo esc_html(sprintf(__('Errors: %d', 'vernal-contentum'), (int) ($last['errors'] ?? 0))); ?></li>
+                    </ul>
+                    <p class="description">
+                        <?php echo esc_html($last['completed_at'] ?? $last['started_at'] ?? ''); ?>
+                        <?php if (!empty($last['run_id'])) : ?>
+                            <span> · <?php echo esc_html($last['run_id']); ?></span>
+                        <?php endif; ?>
+                    </p>
                 <?php else : ?>
-                    <p><?php esc_html_e('No runs yet.', 'vernal-contentum'); ?></p>
+                    <p><?php esc_html_e('No automatic or manual runs yet.', 'vernal-contentum'); ?></p>
                 <?php endif; ?>
                 <?php if (is_array($lock) && !empty($lock['lease_expires_at']) && (int) $lock['lease_expires_at'] > time()) : ?>
-                    <p><em><?php esc_html_e('A run lease is currently held.', 'vernal-contentum'); ?></em></p>
+                    <p><em><?php esc_html_e('A run is in progress right now. Wait for it to finish before starting another.', 'vernal-contentum'); ?></em></p>
                 <?php endif; ?>
-                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline;">
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-top:12px;">
                     <input type="hidden" name="action" value="vernal_il_run_now" />
                     <?php wp_nonce_field('vernal_il_run_now'); ?>
-                    <?php submit_button(__('Run Now', 'vernal-contentum'), 'primary', 'submit', false); ?>
+                    <?php submit_button(__('Run linking now', 'vernal-contentum'), 'primary', 'submit', false); ?>
+                    <span class="description" style="margin-left:8px;"><?php esc_html_e('Use this to test settings or catch up after a busy publishing day.', 'vernal-contentum'); ?></span>
                 </form>
             </div>
 
             <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
                 <input type="hidden" name="action" value="vernal_il_save_settings" />
                 <?php wp_nonce_field('vernal_il_save_settings'); ?>
+
+                <h2><?php esc_html_e('Site connection', 'vernal-contentum'); ?></h2>
+                <p class="description" style="max-width:820px;margin-bottom:12px;">
+                    <?php esc_html_e('Tells Vernal which WordPress site this is, so it only links articles from this site — not another customer\'s site.', 'vernal-contentum'); ?>
+                </p>
                 <table class="form-table" role="presentation">
-                    <tr>
-                        <th><?php esc_html_e('Enabled', 'vernal-contentum'); ?></th>
-                        <td><label><input type="checkbox" name="vernal_il[enabled]" value="1" <?php checked(!empty($settings['enabled'])); ?> /> <?php esc_html_e('Run on schedule', 'vernal-contentum'); ?></label></td>
-                    </tr>
-                    <tr>
-                        <th><?php esc_html_e('Schedule', 'vernal-contentum'); ?></th>
-                        <td>
-                            <select name="vernal_il[schedule]">
-                                <?php foreach (array('hourly', 'twicedaily', 'daily', 'weekly') as $s) : ?>
-                                    <option value="<?php echo esc_attr($s); ?>" <?php selected($settings['schedule'], $s); ?>><?php echo esc_html($s); ?></option>
-                                <?php endforeach; ?>
-                            </select>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th><?php esc_html_e('Max new outbound / source pass', 'vernal-contentum'); ?></th>
-                        <td><input type="number" name="vernal_il[max_new_outbound_links_per_source]" value="<?php echo (int) $settings['max_new_outbound_links_per_source']; ?>" min="0" max="20" /></td>
-                    </tr>
-                    <tr>
-                        <th><?php esc_html_e('Max inbound mutations / new target', 'vernal-contentum'); ?></th>
-                        <td><input type="number" name="vernal_il[max_inbound_source_mutations_per_new_target]" value="<?php echo (int) $settings['max_inbound_source_mutations_per_new_target']; ?>" min="0" max="20" /></td>
-                    </tr>
-                    <tr>
-                        <th><?php esc_html_e('Batch sources / tick', 'vernal-contentum'); ?></th>
-                        <td><input type="number" name="vernal_il[batch_sources_per_tick]" value="<?php echo (int) $settings['batch_sources_per_tick']; ?>" min="1" max="50" /></td>
-                    </tr>
-                    <tr>
-                        <th><?php esc_html_e('Min relevance score', 'vernal-contentum'); ?></th>
-                        <td><input type="number" step="0.01" min="0" max="1" name="vernal_il[min_relevance_score]" value="<?php echo esc_attr($settings['min_relevance_score']); ?>" /></td>
-                    </tr>
-                    <tr>
-                        <th><?php esc_html_e('Social destination ID', 'vernal-contentum'); ?></th>
-                        <td><input type="number" name="vernal_il[social_destination_id]" value="<?php echo (int) $settings['social_destination_id']; ?>" min="0" />
-                        <p class="description"><?php esc_html_e('Machine destination id for tenant isolation on match/index.', 'vernal-contentum'); ?></p></td>
-                    </tr>
-                    <tr>
-                        <th><?php esc_html_e('Orphan repair after days', 'vernal-contentum'); ?></th>
-                        <td>
-                            <label><input type="checkbox" name="vernal_il[orphan_repair_enabled]" value="1" <?php checked(!empty($settings['orphan_repair_enabled'])); ?> /> <?php esc_html_e('Enabled', 'vernal-contentum'); ?></label>
-                            <input type="number" name="vernal_il[orphan_repair_after_days]" value="<?php echo (int) $settings['orphan_repair_after_days']; ?>" min="0" />
-                        </td>
-                    </tr>
-                    <tr>
-                        <th><?php esc_html_e('Excluded category IDs', 'vernal-contentum'); ?></th>
-                        <td><input type="text" class="regular-text" name="vernal_il[excluded_category_ids]" value="<?php echo esc_attr(implode(',', $settings['excluded_category_ids'])); ?>" /></td>
-                    </tr>
-                    <tr>
-                        <th><?php esc_html_e('Excluded post IDs', 'vernal-contentum'); ?></th>
-                        <td><input type="text" class="regular-text" name="vernal_il[excluded_post_ids]" value="<?php echo esc_attr(implode(',', $settings['excluded_post_ids'])); ?>" /></td>
-                    </tr>
-                    <tr>
-                        <th><?php esc_html_e('Process new/modified', 'vernal-contentum'); ?></th>
-                        <td><label><input type="checkbox" name="vernal_il[process_new_and_modified]" value="1" <?php checked(!empty($settings['process_new_and_modified'])); ?> /> <?php esc_html_e('Yes', 'vernal-contentum'); ?></label></td>
-                    </tr>
-                    <tr>
-                        <th><?php esc_html_e('Prefer same category', 'vernal-contentum'); ?></th>
-                        <td><label><input type="checkbox" name="vernal_il[prefer_same_category]" value="1" <?php checked(!empty($settings['prefer_same_category'])); ?> /> <?php esc_html_e('Soft preference (Machine ranking)', 'vernal-contentum'); ?></label></td>
-                    </tr>
+                    <?php
+                    ob_start();
+                    ?>
+                    <input type="number" class="small-text" name="vernal_il[social_destination_id]" value="<?php echo (int) $settings['social_destination_id']; ?>" min="0" />
+                    <?php
+                    $field = ob_get_clean();
+                    $this->render_settings_row(
+                        __('Vernal WordPress site ID', 'vernal-contentum'),
+                        $field,
+                        __('The numeric ID for this site in Vernal (WordPress destinations). Required for linking to work.', 'vernal-contentum'),
+                        __('If this is 0, linking will not run. Your Vernal admin can look up the correct ID.', 'vernal-contentum')
+                    );
+                    ?>
                 </table>
+
+                <h2><?php esc_html_e('Automatic schedule', 'vernal-contentum'); ?></h2>
+                <p class="description" style="max-width:820px;margin-bottom:12px;">
+                    <?php esc_html_e('How often the site checks articles and adds links without you clicking anything.', 'vernal-contentum'); ?>
+                </p>
+                <table class="form-table" role="presentation">
+                    <?php
+                    ob_start();
+                    ?>
+                    <label>
+                        <input type="checkbox" name="vernal_il[enabled]" value="1" <?php checked(!empty($settings['enabled'])); ?> />
+                        <?php esc_html_e('Turn on automatic linking', 'vernal-contentum'); ?>
+                    </label>
+                    <?php
+                    $this->render_settings_row(
+                        __('Automatic linking', 'vernal-contentum'),
+                        ob_get_clean(),
+                        __('When checked, WordPress runs linking on the schedule below.', 'vernal-contentum'),
+                        __('Off = only runs when you click “Run linking now”.', 'vernal-contentum')
+                    );
+
+                    ob_start();
+                    ?>
+                    <select name="vernal_il[schedule]">
+                        <?php foreach ($schedule_labels as $value => $label) : ?>
+                            <option value="<?php echo esc_attr($value); ?>" <?php selected($settings['schedule'], $value); ?>><?php echo esc_html($label); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <?php
+                    $this->render_settings_row(
+                        __('How often to run', 'vernal-contentum'),
+                        ob_get_clean(),
+                        __('How frequently WordPress looks for new linking opportunities.', 'vernal-contentum'),
+                        __('Publishing many articles per day? Choose “Every hour”. A quiet site can use “Once a day”.', 'vernal-contentum')
+                    );
+
+                    ob_start();
+                    ?>
+                    <input type="number" class="small-text" name="vernal_il[batch_sources_per_tick]" value="<?php echo (int) $settings['batch_sources_per_tick']; ?>" min="1" max="50" />
+                    <?php
+                    $this->render_settings_row(
+                        __('Articles checked each run', 'vernal-contentum'),
+                        ob_get_clean(),
+                        __('Maximum number of articles WordPress will review in one pass.', 'vernal-contentum'),
+                        __('Higher = more articles processed per run (good for 50–100+ posts/day). Lower = lighter on the server but slower catch-up.', 'vernal-contentum')
+                    );
+
+                    ob_start();
+                    ?>
+                    <label>
+                        <input type="checkbox" name="vernal_il[process_new_and_modified]" value="1" <?php checked(!empty($settings['process_new_and_modified'])); ?> />
+                        <?php esc_html_e('Include newly published and recently edited articles', 'vernal-contentum'); ?>
+                    </label>
+                    <?php
+                    $this->render_settings_row(
+                        __('New and edited articles', 'vernal-contentum'),
+                        ob_get_clean(),
+                        __('Prioritizes fresh content and real edits. Ignores changes made only by this linking tool.', 'vernal-contentum'),
+                        __('Leave on for active publishing. Turn off only if you want linking to focus on older catch-up.', 'vernal-contentum')
+                    );
+                    ?>
+                </table>
+
+                <h2><?php esc_html_e('How many links to add', 'vernal-contentum'); ?></h2>
+                <p class="description" style="max-width:820px;margin-bottom:12px;">
+                    <?php esc_html_e('Caps keep posts from getting stuffed with links. These are per run, not lifetime limits.', 'vernal-contentum'); ?>
+                </p>
+                <table class="form-table" role="presentation">
+                    <?php
+                    ob_start();
+                    ?>
+                    <input type="number" class="small-text" name="vernal_il[max_new_outbound_links_per_source]" value="<?php echo (int) $settings['max_new_outbound_links_per_source']; ?>" min="0" max="20" />
+                    <?php
+                    $this->render_settings_row(
+                        __('New links added to each article (per run)', 'vernal-contentum'),
+                        ob_get_clean(),
+                        __('When an article is checked, at most this many new outbound links are inserted into that article.', 'vernal-contentum'),
+                        __('Higher = more internal links per article per pass (more SEO wiring, but can feel heavy). Lower = gentler. 2–3 is a safe default.', 'vernal-contentum')
+                    );
+
+                    ob_start();
+                    ?>
+                    <input type="number" class="small-text" name="vernal_il[max_inbound_source_mutations_per_new_target]" value="<?php echo (int) $settings['max_inbound_source_mutations_per_new_target']; ?>" min="0" max="20" />
+                    <?php
+                    $this->render_settings_row(
+                        __('Older articles updated for each new post', 'vernal-contentum'),
+                        ob_get_clean(),
+                        __('When something new is published, up to this many older articles may get a link pointing to the new post.', 'vernal-contentum'),
+                        __('Higher = new posts get more backlinks from old content quickly. Lower = fewer edits to existing posts. 1–2 is usually enough.', 'vernal-contentum')
+                    );
+                    ?>
+                </table>
+
+                <h2><?php esc_html_e('Match quality', 'vernal-contentum'); ?></h2>
+                <p class="description" style="max-width:820px;margin-bottom:12px;">
+                    <?php esc_html_e('Controls how picky the system is about which articles are “related enough” to link.', 'vernal-contentum'); ?>
+                </p>
+                <table class="form-table" role="presentation">
+                    <?php
+                    ob_start();
+                    ?>
+                    <input type="number" step="0.01" min="0" max="1" class="small-text" name="vernal_il[min_relevance_score]" value="<?php echo esc_attr($settings['min_relevance_score']); ?>" />
+                    <?php
+                    $this->render_settings_row(
+                        __('How closely related articles must be', 'vernal-contentum'),
+                        ob_get_clean(),
+                        __('Score from 0 to 1. Only pairs at or above this score are considered.', 'vernal-contentum'),
+                        __('Higher (e.g. 0.45) = fewer links, but very on-topic. Lower (e.g. 0.30) = more links, but some may feel loosely related. Default 0.35 is balanced.', 'vernal-contentum')
+                    );
+
+                    ob_start();
+                    ?>
+                    <label>
+                        <input type="checkbox" name="vernal_il[prefer_same_category]" value="1" <?php checked(!empty($settings['prefer_same_category'])); ?> />
+                        <?php esc_html_e('Prefer linking articles in the same category', 'vernal-contentum'); ?>
+                    </label>
+                    <?php
+                    $this->render_settings_row(
+                        __('Same category preference', 'vernal-contentum'),
+                        ob_get_clean(),
+                        __('When two articles score similarly, favor the one in the same WordPress category.', 'vernal-contentum'),
+                        __('On = tighter topical clusters. Off = purely topic-based matching across categories.', 'vernal-contentum')
+                    );
+                    ?>
+                </table>
+
+                <h2><?php esc_html_e('Catch-up for older articles', 'vernal-contentum'); ?></h2>
+                <p class="description" style="max-width:820px;margin-bottom:12px;">
+                    <?php esc_html_e('Finds published articles that still have no links added by this tool and tries again.', 'vernal-contentum'); ?>
+                </p>
+                <table class="form-table" role="presentation">
+                    <?php
+                    ob_start();
+                    ?>
+                    <label style="display:inline-block;margin-right:12px;">
+                        <input type="checkbox" name="vernal_il[orphan_repair_enabled]" value="1" <?php checked(!empty($settings['orphan_repair_enabled'])); ?> />
+                        <?php esc_html_e('Turn on catch-up for articles with no links yet', 'vernal-contentum'); ?>
+                    </label>
+                    <label>
+                        <?php esc_html_e('Wait at least', 'vernal-contentum'); ?>
+                        <input type="number" class="small-text" name="vernal_il[orphan_repair_after_days]" value="<?php echo (int) $settings['orphan_repair_after_days']; ?>" min="0" />
+                        <?php esc_html_e('days after publish', 'vernal-contentum'); ?>
+                    </label>
+                    <?php
+                    $this->render_settings_row(
+                        __('Orphan catch-up', 'vernal-contentum'),
+                        ob_get_clean(),
+                        __('Re-checks older articles that never received a Vernal link.', 'vernal-contentum'),
+                        __('More days = less rework on brand-new posts. Fewer days = faster catch-up on articles that were missed.', 'vernal-contentum')
+                    );
+                    ?>
+                </table>
+
+                <h2><?php esc_html_e('Articles to skip', 'vernal-contentum'); ?></h2>
+                <p class="description" style="max-width:820px;margin-bottom:12px;">
+                    <?php esc_html_e('Optional block list. Show landing pages and non-articles are already skipped automatically.', 'vernal-contentum'); ?>
+                </p>
+                <table class="form-table" role="presentation">
+                    <?php
+                    ob_start();
+                    ?>
+                    <input type="text" class="regular-text" name="vernal_il[excluded_category_ids]" value="<?php echo esc_attr(implode(',', $settings['excluded_category_ids'])); ?>" placeholder="12, 45" />
+                    <?php
+                    $this->render_settings_row(
+                        __('Excluded category IDs', 'vernal-contentum'),
+                        ob_get_clean(),
+                        __('Comma-separated WordPress category IDs. Articles in these categories are never used as source or target.', 'vernal-contentum'),
+                        __('Example: exclude press releases or legal pages you never want auto-linked.', 'vernal-contentum')
+                    );
+
+                    ob_start();
+                    ?>
+                    <input type="text" class="regular-text" name="vernal_il[excluded_post_ids]" value="<?php echo esc_attr(implode(',', $settings['excluded_post_ids'])); ?>" placeholder="101, 202" />
+                    <?php
+                    $this->render_settings_row(
+                        __('Excluded post IDs', 'vernal-contentum'),
+                        ob_get_clean(),
+                        __('Comma-separated WordPress post IDs to never touch.', 'vernal-contentum'),
+                        __('Use for cornerstone pages or posts you edit by hand only.', 'vernal-contentum')
+                    );
+                    ?>
+                </table>
+
+                <details style="max-width:920px;margin:24px 0 12px;">
+                    <summary style="cursor:pointer;font-size:14px;font-weight:600;">
+                        <?php esc_html_e('Advanced limits (optional)', 'vernal-contentum'); ?>
+                    </summary>
+                    <p class="description" style="margin:12px 0;">
+                        <?php esc_html_e('Most sites can leave these at the defaults. They prevent any single article from becoming over-linked.', 'vernal-contentum'); ?>
+                    </p>
+                    <table class="form-table" role="presentation">
+                        <?php
+                        ob_start();
+                        ?>
+                        <input type="number" class="small-text" name="vernal_il[min_word_count]" value="<?php echo (int) $settings['min_word_count']; ?>" min="0" />
+                        <?php
+                        $this->render_settings_row(
+                            __('Minimum article length (words)', 'vernal-contentum'),
+                            ob_get_clean(),
+                            __('Skip very short posts that are not useful for in-body linking.', 'vernal-contentum'),
+                            __('Higher = only longer articles qualify. Lower = includes brief posts.', 'vernal-contentum')
+                        );
+
+                        ob_start();
+                        ?>
+                        <input type="number" class="small-text" name="vernal_il[max_vernal_links_per_post]" value="<?php echo (int) $settings['max_vernal_links_per_post']; ?>" min="0" />
+                        <?php
+                        $this->render_settings_row(
+                            __('Max links added by this tool (per article, total)', 'vernal-contentum'),
+                            ob_get_clean(),
+                            __('Stop adding Vernal-managed links after an article already has this many.', 'vernal-contentum'),
+                            __('Higher = more auto-links allowed over time. Lower = stricter cap.', 'vernal-contentum')
+                        );
+
+                        ob_start();
+                        ?>
+                        <input type="number" class="small-text" name="vernal_il[max_total_internal_links_per_post]" value="<?php echo (int) $settings['max_total_internal_links_per_post']; ?>" min="0" />
+                        <?php
+                        $this->render_settings_row(
+                            __('Max internal links in one article (all sources)', 'vernal-contentum'),
+                            ob_get_clean(),
+                            __('Counts manual links plus Vernal links. Stops new inserts if the article is already link-heavy.', 'vernal-contentum'),
+                            __('Higher = allows busier articles. Lower = keeps pages cleaner.', 'vernal-contentum')
+                        );
+                        ?>
+                    </table>
+                </details>
+
                 <?php submit_button(__('Save settings', 'vernal-contentum')); ?>
             </form>
 
-            <h2><?php esc_html_e('Recent mutations', 'vernal-contentum'); ?></h2>
-            <table class="widefat striped">
+            <h2><?php esc_html_e('Recent links added', 'vernal-contentum'); ?></h2>
+            <p class="description" style="max-width:820px;">
+                <?php esc_html_e('Links inserted by this tool. Undo removes the link but keeps the visible text in the article.', 'vernal-contentum'); ?>
+            </p>
+            <table class="widefat striped" style="max-width:920px;">
                 <thead>
                     <tr>
                         <th><?php esc_html_e('When', 'vernal-contentum'); ?></th>
-                        <th><?php esc_html_e('Source', 'vernal-contentum'); ?></th>
-                        <th><?php esc_html_e('Target', 'vernal-contentum'); ?></th>
-                        <th><?php esc_html_e('Anchor', 'vernal-contentum'); ?></th>
-                        <th><?php esc_html_e('Strategy', 'vernal-contentum'); ?></th>
+                        <th><?php esc_html_e('Article edited', 'vernal-contentum'); ?></th>
+                        <th><?php esc_html_e('Linked to article', 'vernal-contentum'); ?></th>
+                        <th><?php esc_html_e('Linked phrase', 'vernal-contentum'); ?></th>
+                        <th><?php esc_html_e('Why', 'vernal-contentum'); ?></th>
                         <th><?php esc_html_e('Undo', 'vernal-contentum'); ?></th>
                     </tr>
                 </thead>
                 <tbody>
                 <?php if (!$recent) : ?>
-                    <tr><td colspan="6"><?php esc_html_e('None yet.', 'vernal-contentum'); ?></td></tr>
+                    <tr><td colspan="6"><?php esc_html_e('No links added yet.', 'vernal-contentum'); ?></td></tr>
                 <?php else : foreach ($recent as $row) :
                     $undo_url = wp_nonce_url(
                         add_query_arg(array(
@@ -1091,14 +1365,28 @@ class Vernal_Internal_Links {
                         ), admin_url('admin-post.php')),
                         'vernal_il_undo'
                     );
+                    $source_id = (int) ($row['source_wp_post_id'] ?? 0);
+                    $target_id = (int) ($row['target_wp_post_id'] ?? 0);
                     ?>
                     <tr>
                         <td><?php echo esc_html($row['inserted_at'] ?? ''); ?></td>
-                        <td><?php echo (int) ($row['source_wp_post_id'] ?? 0); ?></td>
-                        <td><?php echo (int) ($row['target_wp_post_id'] ?? 0); ?></td>
+                        <td>
+                            <?php if ($source_id) : ?>
+                                <a href="<?php echo esc_url(get_edit_post_link($source_id, 'raw')); ?>">#<?php echo (int) $source_id; ?></a>
+                            <?php else : ?>
+                                —
+                            <?php endif; ?>
+                        </td>
+                        <td>
+                            <?php if ($target_id) : ?>
+                                <a href="<?php echo esc_url(get_edit_post_link($target_id, 'raw')); ?>">#<?php echo (int) $target_id; ?></a>
+                            <?php else : ?>
+                                —
+                            <?php endif; ?>
+                        </td>
                         <td><?php echo esc_html($row['anchor'] ?? ''); ?></td>
-                        <td><?php echo esc_html($row['strategy'] ?? ''); ?></td>
-                        <td><a href="<?php echo esc_url($undo_url); ?>"><?php esc_html_e('Undo', 'vernal-contentum'); ?></a></td>
+                        <td><?php echo esc_html($this->humanize_strategy_label((string) ($row['strategy'] ?? ''))); ?></td>
+                        <td><a href="<?php echo esc_url($undo_url); ?>"><?php esc_html_e('Remove link', 'vernal-contentum'); ?></a></td>
                     </tr>
                 <?php endforeach; endif; ?>
                 </tbody>

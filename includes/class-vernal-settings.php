@@ -88,11 +88,11 @@ class Vernal_Settings {
             array($this, 'render_show_retrofit_page')
         );
 
-        // Submenu: Internal Linking (SEO finisher)
+        // Submenu: Article Linking (SEO finisher)
         add_submenu_page(
             'vernal-contentum',
-            __('Internal Linking', 'vernal-contentum'),
-            __('Internal Linking', 'vernal-contentum'),
+            __('Article Linking', 'vernal-contentum'),
+            __('Article Linking', 'vernal-contentum'),
             'manage_options',
             'vernal-contentum-internal-links',
             array($this, 'render_internal_links_page')
