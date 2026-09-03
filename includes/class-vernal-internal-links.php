@@ -16,10 +16,13 @@ class Vernal_Internal_Links {
     const OPTION_LAST_RUN = 'vernal_contentum_il_last_run';
     const OPTION_RECENT   = 'vernal_contentum_il_recent_mutations';
     const CRON_HOOK       = 'vernal_il_cron_tick';
+    const CRON_RECONCILE  = 'vernal_il_reconcile_tick';
     const META_PASS_AT    = '_vernal_il_pass_at';
     const META_SRC_MOD    = '_vernal_il_source_modified_gmt';
     const META_FP         = '_vernal_il_content_fp';
     const META_LINKS      = '_vernal_il_links';
+    const META_GRAPH      = '_vernal_il_graph_stats';
+    const META_TARGETS    = '_vernal_il_link_targets';
     const LEASE_SECONDS   = 900;
 
     private static $instance = null;
@@ -34,6 +37,7 @@ class Vernal_Internal_Links {
     private function __construct() {
         add_filter('cron_schedules', array($this, 'register_schedules'));
         add_action(self::CRON_HOOK, array($this, 'cron_tick'));
+        add_action(self::CRON_RECONCILE, array($this, 'reconcile_inbound_cache'));
         add_action('save_post_post', array($this, 'maybe_enqueue_on_save'), 20, 3);
         add_action('admin_post_vernal_il_run_now', array($this, 'handle_run_now'));
         add_action('admin_post_vernal_il_undo', array($this, 'handle_undo'));
@@ -44,16 +48,19 @@ class Vernal_Internal_Links {
     public static function default_settings() {
         return array(
             'enabled'                                    => 1,
-            'schedule'                                   => 'daily',
-            'max_new_outbound_links_per_source'          => 3,
-            'max_inbound_source_mutations_per_new_target'=> 2,
-            'batch_sources_per_tick'                     => 10,
+            'schedule'                                   => 'hourly',
+            'max_new_outbound_links_per_source'          => 1,
+            'max_inbound_source_mutations_per_new_target'=> 1,
+            'batch_sources_per_tick'                     => 25,
             'min_relevance_score'                        => 0.35,
             'prefer_same_category'                       => 1,
             'orphan_repair_after_days'                   => 14,
             'min_word_count'                             => 120,
-            'max_vernal_links_per_post'                  => 8,
+            'max_vernal_links_per_post'                  => 12,
             'max_total_internal_links_per_post'          => 12,
+            'soft_target_long_form'                      => 8,
+            'healthy_cooldown_days'                      => 7,
+            'pillar_post_ids'                            => array(),
             'excluded_category_ids'                      => array(),
             'excluded_post_ids'                          => array(),
             'social_destination_id'                      => 0,
@@ -71,6 +78,9 @@ class Vernal_Internal_Links {
         $out = array_merge($defaults, $stored);
         $out['excluded_category_ids'] = self::normalize_id_list(isset($out['excluded_category_ids']) ? $out['excluded_category_ids'] : array());
         $out['excluded_post_ids'] = self::normalize_id_list(isset($out['excluded_post_ids']) ? $out['excluded_post_ids'] : array());
+        $out['pillar_post_ids'] = self::normalize_id_list(isset($out['pillar_post_ids']) ? $out['pillar_post_ids'] : array());
+        // v1 hard rule: at most one edge per source per pass
+        $out['max_new_outbound_links_per_source'] = 1;
         return $out;
     }
 
@@ -106,12 +116,16 @@ class Vernal_Internal_Links {
         $wanted = !empty($settings['enabled']) ? $settings['schedule'] : '';
         $allowed = array('hourly', 'twicedaily', 'daily', 'weekly');
         if ($wanted && !in_array($wanted, $allowed, true)) {
-            $wanted = 'daily';
+            $wanted = 'hourly';
         }
         $next = wp_next_scheduled(self::CRON_HOOK);
         if (empty($settings['enabled'])) {
             if ($next) {
                 wp_unschedule_event($next, self::CRON_HOOK);
+            }
+            $rec = wp_next_scheduled(self::CRON_RECONCILE);
+            if ($rec) {
+                wp_unschedule_event($rec, self::CRON_RECONCILE);
             }
             return;
         }
@@ -124,6 +138,9 @@ class Vernal_Internal_Links {
             wp_schedule_event(time() + 60, $wanted, self::CRON_HOOK);
             update_option('vernal_il_cron_schedule', $wanted, false);
         }
+        if (!wp_next_scheduled(self::CRON_RECONCILE)) {
+            wp_schedule_event(time() + 300, 'daily', self::CRON_RECONCILE);
+        }
     }
 
     public function cron_tick() {
@@ -132,6 +149,44 @@ class Vernal_Internal_Links {
             return;
         }
         $this->run_pass('cron');
+    }
+
+    /**
+     * Nightly: recompute derived inbound counts from a wider post sample.
+     */
+    public function reconcile_inbound_cache() {
+        $settings = self::get_settings();
+        $counts = $this->estimate_inbound_counts($settings, 200);
+        foreach ($counts as $post_id => $in_count) {
+            $post_id = (int) $post_id;
+            if ($post_id < 1) {
+                continue;
+            }
+            $stats = $this->get_graph_stats($post_id);
+            $stats['contextual_links_in'] = (int) $in_count;
+            $stats['computed_at'] = gmdate('c');
+            $stats['cache_version'] = 1;
+            $post = get_post($post_id);
+            if ($post) {
+                $analysis = Vernal_Internal_Link_Inserter::analyze_internal_links($post->post_content);
+                $stats['contextual_links_out'] = (int) $analysis['total'];
+                $stats['vernal_links_out'] = (int) $analysis['vernal'];
+                $stats['orphan_status'] = ($analysis['vernal'] === 0 && (int) $in_count === 0);
+                $profile = $this->resolve_link_profile($post, $settings);
+                $slots = isset($stats['slots_filled_by_role']) && is_array($stats['slots_filled_by_role'])
+                    ? $stats['slots_filled_by_role']
+                    : $this->slots_from_ledger($post_id);
+                $stats['link_health'] = $this->compute_link_health_label(
+                    $post,
+                    $settings,
+                    $analysis,
+                    (int) $in_count,
+                    $profile,
+                    $slots
+                );
+            }
+            $this->save_graph_stats($post_id, $stats);
+        }
     }
 
     /**
@@ -238,7 +293,7 @@ class Vernal_Internal_Links {
                     $summary['errors'] += (int) $result['errors'];
                 } else {
                     // Stamp success for this source even if zero links (idempotent pass)
-                    $this->stamp_source_pass($post->ID);
+                    $this->stamp_source_pass($post->ID, !empty($result['linked']));
                 }
 
                 // After processing a relatively new source, try inbound backfill onto older posts
@@ -399,12 +454,26 @@ class Vernal_Internal_Links {
         $fp = Vernal_Internal_Link_Inserter::content_fingerprint($post->post_content);
         $stored_fp = (string) get_post_meta($post->ID, self::META_FP, true);
         $pass_at = (string) get_post_meta($post->ID, self::META_PASS_AT, true);
+        $stats = $this->get_graph_stats($post->ID);
 
         if ($pass_at === '') {
             return true;
         }
         if ($stored_fp && $stored_fp !== $fp) {
+            $this->wake_post($post->ID, 'editorial_edit');
             return true; // genuine editorial change
+        }
+
+        // Healthy cooldown: skip until next_eligible_at unless woken
+        $next = isset($stats['next_eligible_at']) ? (string) $stats['next_eligible_at'] : '';
+        if ($next !== '') {
+            $next_ts = strtotime($next);
+            if ($next_ts && $next_ts > time()) {
+                $health = isset($stats['link_health']) ? (string) $stats['link_health'] : '';
+                if (in_array($health, array('healthy', 'overlinked'), true)) {
+                    return false;
+                }
+            }
         }
 
         // Orphan repair: zero Vernal outbound links and old enough
@@ -413,7 +482,6 @@ class Vernal_Internal_Links {
             $days = (int) $settings['orphan_repair_after_days'];
             $age = time() - strtotime($post->post_date_gmt . ' UTC');
             if ($analysis['vernal'] === 0 && $days > 0 && $age > ($days * DAY_IN_SECONDS)) {
-                // Only re-run if last pass older than orphan window
                 $pass_ts = strtotime($pass_at);
                 if (!$pass_ts || (time() - $pass_ts) > ($days * DAY_IN_SECONDS)) {
                     return true;
@@ -425,13 +493,22 @@ class Vernal_Internal_Links {
         if (!empty($settings['process_new_and_modified'])) {
             $last_success = get_option('vernal_il_last_success_gmt', '');
             $src_mod_stamp = (string) get_post_meta($post->ID, self::META_SRC_MOD, true);
-            // If current post_modified_gmt equals what we stamped, our write — skip
             if ($src_mod_stamp && $src_mod_stamp === $post->post_modified_gmt && $stored_fp === $fp) {
+                // Still eligible if underlinked / missing cornerstone / new
+                $health = isset($stats['link_health']) ? (string) $stats['link_health'] : '';
+                if (in_array($health, array('underlinked', 'missing_cornerstone', 'orphan', 'new_unoptimized'), true)) {
+                    return empty($next) || (strtotime($next) && strtotime($next) <= time());
+                }
                 return false;
             }
             if ($last_success && $post->post_date_gmt > $last_success && $pass_at < $post->post_date_gmt) {
                 return true;
             }
+        }
+
+        $health = isset($stats['link_health']) ? (string) $stats['link_health'] : '';
+        if (in_array($health, array('underlinked', 'missing_cornerstone', 'orphan', 'new_unoptimized', ''), true)) {
+            return true;
         }
 
         return false;
@@ -442,7 +519,7 @@ class Vernal_Internal_Links {
         return $age <= ($days * DAY_IN_SECONDS);
     }
 
-    public function stamp_source_pass($post_id) {
+    public function stamp_source_pass($post_id, $mutated = false) {
         $post = get_post($post_id);
         if (!$post) {
             return;
@@ -454,49 +531,50 @@ class Vernal_Internal_Links {
             self::META_FP,
             Vernal_Internal_Link_Inserter::content_fingerprint($post->post_content)
         );
+        $this->refresh_graph_stats_for_post($post_id, $mutated);
     }
 
     /**
-     * Process outbound links for one source.
+     * Process outbound links for one source — at most one high-value edge.
      */
     private function process_source_outbound($post, $settings, $run_id, $dest_id, $trigger) {
         $out = array('linked' => 0, 'skipped' => 0, 'errors' => 0);
         $analysis = Vernal_Internal_Link_Inserter::analyze_internal_links($post->post_content);
-        $max_new = (int) $settings['max_new_outbound_links_per_source'];
-        $max_vernal = (int) $settings['max_vernal_links_per_post'];
+        $profile = $this->resolve_link_profile($post, $settings);
+        $max_vernal = (int) $profile['soft_max'];
+        if ($max_vernal >= 999) {
+            $max_vernal = max(20, (int) $settings['max_vernal_links_per_post']);
+        }
         $max_total = (int) $settings['max_total_internal_links_per_post'];
+        if ($max_vernal < 999 && $max_total < $max_vernal) {
+            // Keep total soft cap aligned for non-pillars
+            $max_total = max($max_total, $max_vernal);
+        }
 
         if ($analysis['vernal'] >= $max_vernal || $analysis['total'] >= $max_total) {
             $out['skipped']++;
-            return $out;
-        }
-        $room = min(
-            $max_new,
-            $max_vernal - $analysis['vernal'],
-            $max_total - $analysis['total']
-        );
-        if ($room <= 0) {
-            $out['skipped']++;
+            $this->refresh_graph_stats_for_post($post->ID, false);
             return $out;
         }
 
-        $strategy = 'contextual';
-        if (!empty($settings['orphan_repair_enabled'])) {
+        // v1: exactly one edge per pass when room exists
+        $room = 1;
+
+        $ledger_strategy = 'best_missing_edge';
+        if ($trigger === 'manual_run') {
+            $ledger_strategy = 'manual_run';
+        } elseif (!empty($settings['orphan_repair_enabled'])) {
             $age = time() - strtotime($post->post_date_gmt . ' UTC');
             if ($analysis['vernal'] === 0 && $age > ((int) $settings['orphan_repair_after_days'] * DAY_IN_SECONDS)) {
-                $strategy = 'orphan_repair';
+                $ledger_strategy = 'orphan_repair';
+            } else {
+                $ledger_strategy = 'new_post_outbound';
             }
-        }
-        if ($trigger === 'manual_run') {
-            $strategy = 'contextual';
-            $ledger_strategy = 'manual_run';
-        } elseif ($strategy === 'orphan_repair') {
-            $ledger_strategy = 'orphan_repair';
         } else {
             $ledger_strategy = 'new_post_outbound';
         }
 
-        $payload = $this->build_outbound_match_payload($post, $settings, $dest_id, $analysis, $strategy, $room);
+        $payload = $this->build_best_edge_payload($post, $settings, $dest_id, $analysis, $profile);
         $resp = Vernal_Backend_API::request('plugin/internal-links/match', array(
             'method' => 'POST',
             'body'   => $payload,
@@ -510,6 +588,7 @@ class Vernal_Internal_Links {
         $content = $post->post_content;
         $ledger = $this->get_ledger($post->ID);
         $inserted_this_pass = 0;
+        $used_anchors = $this->used_anchor_texts_from_ledger($ledger);
 
         foreach ($results as $row) {
             if ($inserted_this_pass >= $room) {
@@ -532,7 +611,7 @@ class Vernal_Internal_Links {
                 continue;
             }
             $phrase = isset($anchors[0]['text']) ? (string) $anchors[0]['text'] : '';
-            if ($phrase === '') {
+            if ($phrase === '' || $this->is_generic_anchor($phrase) || in_array(strtolower($phrase), $used_anchors, true)) {
                 $out['skipped']++;
                 continue;
             }
@@ -548,15 +627,19 @@ class Vernal_Internal_Links {
                 continue;
             }
             $content = $ins['content'];
+            $edge_role = isset($row['edge_role']) ? sanitize_key((string) $row['edge_role']) : 'other_relevant';
             $entry = array(
-                'id'                 => $mutation_id,
-                'source_wp_post_id'  => (int) $post->ID,
-                'target_wp_post_id'  => $target_id,
-                'target_url'         => $permalink,
-                'anchor'             => $phrase,
-                'inserted_at'        => gmdate('c'),
-                'run_id'             => $run_id,
-                'strategy'           => $ledger_strategy,
+                'id'                    => $mutation_id,
+                'source_wp_post_id'     => (int) $post->ID,
+                'target_wp_post_id'     => $target_id,
+                'target_url'            => $permalink,
+                'anchor'                => $phrase,
+                'inserted_at'           => gmdate('c'),
+                'run_id'                => $run_id,
+                'strategy'              => $ledger_strategy,
+                'edge_role'             => $edge_role,
+                'link_score'            => $score,
+                'primary_search_intent' => '',
             );
             $ledger[] = $entry;
             $this->push_recent_mutation($entry);
@@ -566,6 +649,12 @@ class Vernal_Internal_Links {
 
         if ($inserted_this_pass > 0) {
             $this->save_post_content($post->ID, $content, $ledger);
+            $this->refresh_graph_stats_for_post($post->ID, true);
+            if (!empty($entry['target_wp_post_id'])) {
+                $this->bump_inbound_cache((int) $entry['target_wp_post_id']);
+            }
+        } else {
+            $this->refresh_graph_stats_for_post($post->ID, false);
         }
         return $out;
     }
@@ -700,6 +789,36 @@ class Vernal_Internal_Links {
         );
     }
 
+    private function build_best_edge_payload($post, $settings, $dest_id, $analysis, $profile) {
+        $inbound_counts = $this->estimate_inbound_counts($settings);
+        $slots = $this->slots_from_ledger($post->ID);
+        $ledger = $this->get_ledger($post->ID);
+        $stats = $this->get_graph_stats($post->ID);
+        $source = $this->post_to_match_source($post);
+        $source['cluster_role'] = isset($stats['cluster_role']) ? (string) $stats['cluster_role'] : 'standalone';
+        $source['topic_cluster_key'] = isset($stats['topic_cluster_key']) ? (string) $stats['topic_cluster_key'] : '';
+        $source['cornerstone_wp_post_id'] = isset($stats['cornerstone_wp_post_id']) ? (int) $stats['cornerstone_wp_post_id'] : 0;
+        $source['word_count'] = str_word_count(wp_strip_all_tags($post->post_content));
+        $source['primary_search_intent'] = isset($stats['primary_search_intent']) ? (string) $stats['primary_search_intent'] : '';
+        if (in_array((int) $post->ID, self::normalize_id_list($settings['pillar_post_ids']), true)) {
+            $source['cluster_role'] = 'pillar';
+        }
+        return array(
+            'mode'                      => 'best_missing_edge',
+            'social_destination_id'     => (int) $dest_id,
+            'min_score'                 => (float) $settings['min_relevance_score'],
+            'source'                    => $source,
+            'already_linked_target_ids' => $analysis['target_ids'],
+            'inbound_counts'            => $inbound_counts,
+            'slots_filled'              => $slots,
+            'used_anchor_texts'         => $this->used_anchor_texts_from_ledger($ledger),
+            'soft_max'                  => (int) $profile['soft_max'],
+            'vernal_links_out'          => (int) $analysis['vernal'],
+            'candidate_stubs'           => $this->build_candidate_stubs($settings, 40, array( (int) $post->ID )),
+            'graph_stats'               => $stats,
+        );
+    }
+
     private function post_to_match_source($post) {
         $cats = wp_get_post_categories($post->ID);
         return array(
@@ -711,6 +830,8 @@ class Vernal_Internal_Links {
             'permalink'             => get_permalink($post),
             'primary_keyphrase'     => '',
             'secondary_keyphrases'  => array(),
+            'published_at'          => $post->post_date_gmt,
+            'word_count'            => str_word_count(wp_strip_all_tags($post->post_content)),
         );
     }
 
@@ -750,20 +871,27 @@ class Vernal_Internal_Links {
         return $stubs;
     }
 
-    private function estimate_inbound_counts($settings) {
-        // Lightweight: count Vernal target ids across a recent sample of posts
+    private function estimate_inbound_counts($settings, $sample = 80) {
+        // Derived graph observation: count Vernal target ids across a post sample.
+        // Not authoritative; HTML + ledger remain source of truth for outbound.
         $counts = array();
         $q = new WP_Query(array(
             'post_type'      => 'post',
             'post_status'    => 'publish',
-            'posts_per_page' => 50,
+            'posts_per_page' => max(20, min(250, (int) $sample)),
             'fields'         => 'ids',
             'no_found_rows'  => true,
+            'orderby'        => 'date',
+            'order'          => 'DESC',
         ));
         foreach ($q->posts as $pid) {
             $content = get_post_field('post_content', $pid);
             $a = Vernal_Internal_Link_Inserter::analyze_internal_links($content);
             foreach ($a['target_ids'] as $tid) {
+                $tid = (int) $tid;
+                if ($tid < 1) {
+                    continue;
+                }
                 if (!isset($counts[$tid])) {
                     $counts[$tid] = 0;
                 }
@@ -771,6 +899,278 @@ class Vernal_Internal_Links {
             }
         }
         return $counts;
+    }
+
+    public function get_graph_stats($post_id) {
+        $raw = get_post_meta((int) $post_id, self::META_GRAPH, true);
+        if (is_string($raw) && $raw !== '') {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded)) {
+                return $decoded;
+            }
+        }
+        if (is_array($raw)) {
+            return $raw;
+        }
+        return array(
+            'cache_version'           => 1,
+            'contextual_links_out'    => 0,
+            'contextual_links_in'     => 0,
+            'cornerstone_links_in'    => 0,
+            'vernal_links_out'        => 0,
+            'orphan_status'           => false,
+            'link_health'             => 'new_unoptimized',
+            'topic_cluster_key'       => '',
+            'cluster_role'            => 'standalone',
+            'cornerstone_wp_post_id'  => 0,
+            'primary_search_intent'   => '',
+            'anchor_texts_used'       => array(),
+            'slots_filled_by_role'    => array(),
+            'last_graph_evaluated_at' => '',
+            'last_graph_mutated_at'   => '',
+            'next_eligible_at'        => '',
+        );
+    }
+
+    private function save_graph_stats($post_id, $stats) {
+        update_post_meta((int) $post_id, self::META_GRAPH, wp_json_encode($stats));
+    }
+
+    public function wake_post($post_id, $reason = '') {
+        $stats = $this->get_graph_stats($post_id);
+        $stats['next_eligible_at'] = '';
+        if (!empty($reason) && empty($stats['link_health'])) {
+            $stats['link_health'] = 'new_unoptimized';
+        }
+        $this->save_graph_stats($post_id, $stats);
+    }
+
+    /**
+     * Wake posts that share a category with the published article (cluster wake heuristic).
+     */
+    private function wake_related_cluster($post_id, $settings) {
+        $cats = wp_get_post_categories((int) $post_id);
+        if (!$cats) {
+            $this->wake_post($post_id, 'publish');
+            return;
+        }
+        $q = new WP_Query(array(
+            'post_type'           => 'post',
+            'post_status'         => 'publish',
+            'posts_per_page'      => 40,
+            'category__in'        => array_map('intval', $cats),
+            'post__not_in'        => array((int) $post_id),
+            'fields'              => 'ids',
+            'no_found_rows'       => true,
+            'ignore_sticky_posts' => true,
+        ));
+        $this->wake_post($post_id, 'publish');
+        foreach ($q->posts as $pid) {
+            $this->wake_post((int) $pid, 'cluster_wake');
+        }
+    }
+
+    public function resolve_link_profile($post, $settings) {
+        $wc = str_word_count(wp_strip_all_tags($post->post_content));
+        $pillars = self::normalize_id_list($settings['pillar_post_ids']);
+        $stats = $this->get_graph_stats($post->ID);
+        $role = isset($stats['cluster_role']) ? (string) $stats['cluster_role'] : 'standalone';
+        if (in_array((int) $post->ID, $pillars, true) || in_array($role, array('pillar', 'cornerstone'), true)) {
+            $profile = array('profile' => 'pillar', 'soft_target' => 12, 'soft_max' => 999);
+        } elseif ($wc < 1200) {
+            $profile = array('profile' => 'short', 'soft_target' => 4, 'soft_max' => 8);
+        } elseif ($wc < 2500) {
+            $profile = array('profile' => 'standard', 'soft_target' => 6, 'soft_max' => 12);
+        } else {
+            $soft_target = max(5, (int) ($settings['soft_target_long_form'] ?? 8));
+            $profile = array('profile' => 'long_form', 'soft_target' => $soft_target, 'soft_max' => 12);
+        }
+        update_post_meta((int) $post->ID, self::META_TARGETS, wp_json_encode($profile));
+        return $profile;
+    }
+
+    public function slots_from_ledger($post_id) {
+        $slots = array(
+            'cornerstone_up'   => 0,
+            'sibling'          => 0,
+            'supporting_down'  => 0,
+            'underlinked'      => 0,
+            'other_relevant'   => 0,
+        );
+        foreach ($this->get_ledger($post_id) as $e) {
+            $role = isset($e['edge_role']) ? (string) $e['edge_role'] : 'other_relevant';
+            if (!isset($slots[$role])) {
+                $role = 'other_relevant';
+            }
+            $slots[$role]++;
+        }
+        return $slots;
+    }
+
+    private function used_anchor_texts_from_ledger($ledger) {
+        $out = array();
+        foreach ((array) $ledger as $e) {
+            if (!empty($e['anchor'])) {
+                $out[] = strtolower((string) $e['anchor']);
+            }
+        }
+        return $out;
+    }
+
+    private function is_generic_anchor($phrase) {
+        $p = strtolower(trim((string) $phrase));
+        return in_array($p, array('learn more', 'read more', 'click here', 'here', 'this article', 'this post'), true);
+    }
+
+    public function compute_link_health_label($post, $settings, $analysis, $inbound, $profile, $slots) {
+        $vernal = (int) $analysis['vernal'];
+        $soft_target = (int) $profile['soft_target'];
+        $soft_max = (int) $profile['soft_max'];
+        $has_cs = !empty($slots['cornerstone_up']);
+        $stats = $this->get_graph_stats($post->ID);
+        $needs_cs = !empty($stats['cornerstone_wp_post_id']) && (int) $stats['cornerstone_wp_post_id'] !== (int) $post->ID;
+        $age = time() - strtotime($post->post_date_gmt . ' UTC');
+        $is_new = $age < (3 * DAY_IN_SECONDS);
+
+        if ($soft_max < 999 && $vernal >= $soft_max) {
+            return 'overlinked';
+        }
+        if ($is_new && $vernal === 0) {
+            return 'new_unoptimized';
+        }
+        if ((int) $inbound === 0 && $vernal === 0) {
+            return 'orphan';
+        }
+        if ($needs_cs && !$has_cs) {
+            return 'missing_cornerstone';
+        }
+        if ((int) $inbound <= 1 && $soft_target >= 5) {
+            return 'underlinked';
+        }
+        if ($vernal < max(1, (int) floor($soft_target / 2))) {
+            return 'underlinked';
+        }
+        return 'healthy';
+    }
+
+    public function refresh_graph_stats_for_post($post_id, $mutated = false) {
+        $post = get_post($post_id);
+        if (!$post) {
+            return;
+        }
+        $settings = self::get_settings();
+        $analysis = Vernal_Internal_Link_Inserter::analyze_internal_links($post->post_content);
+        $stats = $this->get_graph_stats($post_id);
+        $profile = $this->resolve_link_profile($post, $settings);
+        $slots = $this->slots_from_ledger($post_id);
+        $inbound = isset($stats['contextual_links_in']) ? (int) $stats['contextual_links_in'] : 0;
+        $stats['cache_version'] = 1;
+        $stats['computed_at'] = gmdate('c');
+        $stats['contextual_links_out'] = (int) $analysis['total'];
+        $stats['vernal_links_out'] = (int) $analysis['vernal'];
+        $stats['orphan_status'] = ($analysis['vernal'] === 0 && $inbound === 0);
+        $stats['anchor_texts_used'] = $this->used_anchor_texts_from_ledger($this->get_ledger($post_id));
+        $stats['slots_filled_by_role'] = $slots;
+        $stats['link_health'] = $this->compute_link_health_label($post, $settings, $analysis, $inbound, $profile, $slots);
+        $stats['last_graph_evaluated_at'] = gmdate('c');
+        if ($mutated) {
+            $stats['last_graph_mutated_at'] = gmdate('c');
+        }
+        $cooldown_days = max(1, (int) ($settings['healthy_cooldown_days'] ?? 7));
+        if ($stats['link_health'] === 'healthy' || $stats['link_health'] === 'overlinked') {
+            $stats['next_eligible_at'] = gmdate('c', time() + ($cooldown_days * DAY_IN_SECONDS));
+        } else {
+            $stats['next_eligible_at'] = '';
+        }
+        $this->save_graph_stats($post_id, $stats);
+    }
+
+    private function bump_inbound_cache($target_id) {
+        $target_id = (int) $target_id;
+        if ($target_id < 1) {
+            return;
+        }
+        $stats = $this->get_graph_stats($target_id);
+        $stats['contextual_links_in'] = (int) ($stats['contextual_links_in'] ?? 0) + 1;
+        $stats['computed_at'] = gmdate('c');
+        $this->save_graph_stats($target_id, $stats);
+        $this->refresh_graph_stats_for_post($target_id, false);
+    }
+
+    /**
+     * Collect site link-health rows for admin table (derived cache).
+     *
+     * @return array
+     */
+    public function collect_link_health_rows($limit = 20) {
+        $settings = self::get_settings();
+        $q = new WP_Query(array(
+            'post_type'           => 'post',
+            'post_status'         => 'publish',
+            'posts_per_page'      => 60,
+            'orderby'             => 'date',
+            'order'               => 'DESC',
+            'ignore_sticky_posts' => true,
+            'no_found_rows'       => true,
+        ));
+        $rows = array();
+        foreach ($q->posts as $post) {
+            if (!$this->is_post_eligible($post, $settings)) {
+                continue;
+            }
+            $stats = $this->get_graph_stats($post->ID);
+            $analysis = Vernal_Internal_Link_Inserter::analyze_internal_links($post->post_content);
+            $inbound = (int) ($stats['contextual_links_in'] ?? 0);
+            $importance = 0.45;
+            $role = (string) ($stats['cluster_role'] ?? 'standalone');
+            if ($role === 'pillar') {
+                $importance = 1.0;
+            } elseif ($role === 'cornerstone') {
+                $importance = 0.92;
+            } elseif ($role === 'secondary') {
+                $importance = 0.62;
+            }
+            $under = max(0, 3 - $inbound);
+            $rows[] = array(
+                'post_id'    => (int) $post->ID,
+                'title'      => get_the_title($post),
+                'cluster'    => (string) ($stats['topic_cluster_key'] ?? ''),
+                'role'       => $role,
+                'health'     => (string) ($stats['link_health'] ?? 'new_unoptimized'),
+                'links_in'   => $inbound,
+                'links_out'  => (int) $analysis['total'],
+                'vernal_out' => (int) $analysis['vernal'],
+                'gap'        => $this->humanize_gap($stats, $analysis, $inbound),
+                'sort'       => $under * $importance,
+            );
+        }
+        usort($rows, function ($a, $b) {
+            return $b['sort'] <=> $a['sort'];
+        });
+        return array_slice($rows, 0, max(5, (int) $limit));
+    }
+
+    private function humanize_gap($stats, $analysis, $inbound) {
+        $health = (string) ($stats['link_health'] ?? '');
+        if ($health === 'missing_cornerstone') {
+            return __('Missing link up to main topic page', 'vernal-contentum');
+        }
+        if ($health === 'underlinked' || $inbound <= 1) {
+            return sprintf(__('Needs more inbound links (has %d)', 'vernal-contentum'), (int) $inbound);
+        }
+        if ($health === 'orphan') {
+            return __('No internal links in or out yet', 'vernal-contentum');
+        }
+        if ($health === 'new_unoptimized') {
+            return __('New article — not optimized yet', 'vernal-contentum');
+        }
+        if ($health === 'overlinked') {
+            return __('At or over soft link maximum', 'vernal-contentum');
+        }
+        if ($health === 'healthy') {
+            return __('Graph looks healthy', 'vernal-contentum');
+        }
+        return __('Review linking opportunities', 'vernal-contentum');
     }
 
     public function is_valid_target($target_id, $settings, $source_id = 0) {
@@ -845,10 +1245,25 @@ class Vernal_Internal_Links {
             return new WP_Error('not_found', 'Mutation not found in content');
         }
         $ledger = $this->get_ledger($post_id);
+        $removed_target = 0;
+        foreach ($ledger as $e) {
+            if (isset($e['id']) && $e['id'] === $mutation_id) {
+                $removed_target = (int) ($e['target_wp_post_id'] ?? 0);
+                break;
+            }
+        }
         $ledger = array_values(array_filter($ledger, function ($e) use ($mutation_id) {
             return !(isset($e['id']) && $e['id'] === $mutation_id);
         }));
         $this->save_post_content($post_id, $result['content'], $ledger);
+        $this->refresh_graph_stats_for_post($post_id, true);
+        $this->wake_post($post_id, 'undo');
+        if ($removed_target > 0) {
+            $tstats = $this->get_graph_stats($removed_target);
+            $tstats['contextual_links_in'] = max(0, (int) ($tstats['contextual_links_in'] ?? 0) - 1);
+            $this->save_graph_stats($removed_target, $tstats);
+            $this->refresh_graph_stats_for_post($removed_target, false);
+        }
         return true;
     }
 
@@ -862,6 +1277,8 @@ class Vernal_Internal_Links {
         }
         // Clear pass stamp so next tick / immediate run picks it up
         delete_post_meta($post_id, self::META_PASS_AT);
+        $this->wake_post((int) $post_id, 'enqueue');
+        $this->wake_related_cluster((int) $post_id, $settings);
         return array('enqueued' => true, 'post_id' => (int) $post_id);
     }
 
@@ -925,17 +1342,20 @@ class Vernal_Internal_Links {
         $input = isset($_POST['vernal_il']) && is_array($_POST['vernal_il']) ? wp_unslash($_POST['vernal_il']) : array();
         $out = $defaults;
         $out['enabled'] = !empty($input['enabled']) ? 1 : 0;
-        $sched = isset($input['schedule']) ? sanitize_text_field($input['schedule']) : 'daily';
-        $out['schedule'] = in_array($sched, array('hourly', 'twicedaily', 'daily', 'weekly'), true) ? $sched : 'daily';
-        $out['max_new_outbound_links_per_source'] = max(0, (int) ($input['max_new_outbound_links_per_source'] ?? 3));
-        $out['max_inbound_source_mutations_per_new_target'] = max(0, (int) ($input['max_inbound_source_mutations_per_new_target'] ?? 2));
-        $out['batch_sources_per_tick'] = max(1, min(50, (int) ($input['batch_sources_per_tick'] ?? 10)));
+        $sched = isset($input['schedule']) ? sanitize_text_field($input['schedule']) : 'hourly';
+        $out['schedule'] = in_array($sched, array('hourly', 'twicedaily', 'daily', 'weekly'), true) ? $sched : 'hourly';
+        $out['max_new_outbound_links_per_source'] = 1; // v1 hard rule
+        $out['max_inbound_source_mutations_per_new_target'] = max(0, (int) ($input['max_inbound_source_mutations_per_new_target'] ?? 1));
+        $out['batch_sources_per_tick'] = max(1, min(50, (int) ($input['batch_sources_per_tick'] ?? 25)));
         $out['min_relevance_score'] = max(0, min(1, (float) ($input['min_relevance_score'] ?? 0.35)));
         $out['prefer_same_category'] = !empty($input['prefer_same_category']) ? 1 : 0;
         $out['orphan_repair_after_days'] = max(0, (int) ($input['orphan_repair_after_days'] ?? 14));
         $out['min_word_count'] = max(0, (int) ($input['min_word_count'] ?? 120));
-        $out['max_vernal_links_per_post'] = max(0, (int) ($input['max_vernal_links_per_post'] ?? 8));
+        $out['max_vernal_links_per_post'] = max(0, (int) ($input['max_vernal_links_per_post'] ?? 12));
         $out['max_total_internal_links_per_post'] = max(0, (int) ($input['max_total_internal_links_per_post'] ?? 12));
+        $out['soft_target_long_form'] = max(3, min(20, (int) ($input['soft_target_long_form'] ?? 8)));
+        $out['healthy_cooldown_days'] = max(1, min(60, (int) ($input['healthy_cooldown_days'] ?? 7)));
+        $out['pillar_post_ids'] = self::normalize_id_list($input['pillar_post_ids'] ?? '');
         $out['excluded_category_ids'] = self::normalize_id_list($input['excluded_category_ids'] ?? '');
         $out['excluded_post_ids'] = self::normalize_id_list($input['excluded_post_ids'] ?? '');
         $out['social_destination_id'] = max(0, (int) ($input['social_destination_id'] ?? 0));
@@ -986,8 +1406,22 @@ class Vernal_Internal_Links {
             'new_post_inbound_backfill' => __('Older article linked to new one', 'vernal-contentum'),
             'orphan_repair'             => __('Catch-up on article with no links yet', 'vernal-contentum'),
             'manual_run'                => __('Added during a manual run', 'vernal-contentum'),
+            'best_missing_edge'         => __('Highest-value missing link', 'vernal-contentum'),
         );
         return isset($map[$strategy]) ? $map[$strategy] : (string) $strategy;
+    }
+
+    private function humanize_health_label($health) {
+        $map = array(
+            'healthy'             => __('Healthy', 'vernal-contentum'),
+            'underlinked'         => __('Underlinked', 'vernal-contentum'),
+            'missing_cornerstone' => __('Missing cornerstone', 'vernal-contentum'),
+            'overlinked'          => __('Overlinked', 'vernal-contentum'),
+            'intent_collision'    => __('Intent collision', 'vernal-contentum'),
+            'orphan'              => __('Orphan', 'vernal-contentum'),
+            'new_unoptimized'     => __('New / unoptimized', 'vernal-contentum'),
+        );
+        return isset($map[$health]) ? $map[$health] : (string) $health;
     }
 
     /**
@@ -1084,6 +1518,42 @@ class Vernal_Internal_Links {
                 </form>
             </div>
 
+            <?php $health_rows = $this->collect_link_health_rows(20); ?>
+            <div style="background:#fff;border:1px solid #ccd0d4;padding:16px 20px;margin:20px 0;max-width:1100px;">
+                <h2 style="margin-top:0;"><?php esc_html_e('Site link health', 'vernal-contentum'); ?></h2>
+                <p class="description" style="max-width:820px;">
+                    <?php esc_html_e('What Vernal thinks needs attention. Inbound counts are cached graph observations (recomputed nightly), not a second source of truth.', 'vernal-contentum'); ?>
+                </p>
+                <table class="widefat striped" style="margin-top:12px;">
+                    <thead>
+                        <tr>
+                            <th><?php esc_html_e('Article', 'vernal-contentum'); ?></th>
+                            <th><?php esc_html_e('Cluster', 'vernal-contentum'); ?></th>
+                            <th><?php esc_html_e('Role', 'vernal-contentum'); ?></th>
+                            <th><?php esc_html_e('Health', 'vernal-contentum'); ?></th>
+                            <th><?php esc_html_e('Links in / out', 'vernal-contentum'); ?></th>
+                            <th><?php esc_html_e('Gap', 'vernal-contentum'); ?></th>
+                            <th><?php esc_html_e('Action', 'vernal-contentum'); ?></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    <?php if (!$health_rows) : ?>
+                        <tr><td colspan="7"><?php esc_html_e('No articles scored yet. Run linking once to populate health.', 'vernal-contentum'); ?></td></tr>
+                    <?php else : foreach ($health_rows as $hr) : ?>
+                        <tr>
+                            <td><?php echo esc_html($hr['title']); ?></td>
+                            <td><code><?php echo esc_html($hr['cluster'] !== '' ? $hr['cluster'] : '—'); ?></code></td>
+                            <td><?php echo esc_html($hr['role']); ?></td>
+                            <td><?php echo esc_html($this->humanize_health_label($hr['health'])); ?></td>
+                            <td><?php echo esc_html((int) $hr['links_in'] . ' / ' . (int) $hr['links_out']); ?></td>
+                            <td><?php echo esc_html($hr['gap']); ?></td>
+                            <td><a href="<?php echo esc_url(get_edit_post_link((int) $hr['post_id'], 'raw')); ?>"><?php esc_html_e('Edit', 'vernal-contentum'); ?></a></td>
+                        </tr>
+                    <?php endforeach; endif; ?>
+                    </tbody>
+                </table>
+            </div>
+
             <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
                 <input type="hidden" name="action" value="vernal_il_save_settings" />
                 <?php wp_nonce_field('vernal_il_save_settings'); ?>
@@ -1170,21 +1640,63 @@ class Vernal_Internal_Links {
                     ?>
                 </table>
 
-                <h2><?php esc_html_e('How many links to add', 'vernal-contentum'); ?></h2>
+                <h2><?php esc_html_e('Linking goal', 'vernal-contentum'); ?></h2>
                 <p class="description" style="max-width:820px;margin-bottom:12px;">
-                    <?php esc_html_e('Caps keep posts from getting stuffed with links. These are per run, not lifetime limits.', 'vernal-contentum'); ?>
+                    <?php esc_html_e('Soft targets guide health status. The system still only adds a link when it clears relevance gates — it will not fill mediocre links to hit a number. Each run adds at most one link per article.', 'vernal-contentum'); ?>
                 </p>
                 <table class="form-table" role="presentation">
                     <?php
                     ob_start();
                     ?>
-                    <input type="number" class="small-text" name="vernal_il[max_new_outbound_links_per_source]" value="<?php echo (int) $settings['max_new_outbound_links_per_source']; ?>" min="0" max="20" />
+                    <input type="number" class="small-text" name="vernal_il[soft_target_long_form]" value="<?php echo (int) ($settings['soft_target_long_form'] ?? 8); ?>" min="3" max="20" />
+                    <?php
+                    $this->render_settings_row(
+                        __('Long article soft target', 'vernal-contentum'),
+                        ob_get_clean(),
+                        __('Recommended number of contextual links for longer posts (about 2,500+ words). Default 8.', 'vernal-contentum'),
+                        __('This is a goal for health reporting, not a forced quota.', 'vernal-contentum')
+                    );
+
+                    ob_start();
+                    ?>
+                    <input type="number" class="small-text" name="vernal_il[healthy_cooldown_days]" value="<?php echo (int) ($settings['healthy_cooldown_days'] ?? 7); ?>" min="1" max="60" />
+                    <?php
+                    $this->render_settings_row(
+                        __('Healthy article cooldown (days)', 'vernal-contentum'),
+                        ob_get_clean(),
+                        __('After an article looks healthy, wait this many days before reconsidering it (unless it is woken by a related new post or an edit).', 'vernal-contentum'),
+                        __('Higher = less churn on mature pages. Lower = more frequent rechecks.', 'vernal-contentum')
+                    );
+
+                    ob_start();
+                    ?>
+                    <input type="text" class="regular-text" name="vernal_il[pillar_post_ids]" value="<?php echo esc_attr(implode(',', $settings['pillar_post_ids'] ?? array())); ?>" placeholder="101, 202" />
+                    <?php
+                    $this->render_settings_row(
+                        __('Pillar / authority post IDs', 'vernal-contentum'),
+                        ob_get_clean(),
+                        __('Comma-separated WordPress post IDs for main topic pages. These get higher destination importance and a higher soft link allowance.', 'vernal-contentum'),
+                        __('Prefer linking supporting articles up to these pages.', 'vernal-contentum')
+                    );
+                    ?>
+                </table>
+
+                <h2><?php esc_html_e('How many links to add', 'vernal-contentum'); ?></h2>
+                <p class="description" style="max-width:820px;margin-bottom:12px;">
+                    <?php esc_html_e('Each article receives at most one new outbound link per run. Soft maximums stop linking when a page is already well connected.', 'vernal-contentum'); ?>
+                </p>
+                <table class="form-table" role="presentation">
+                    <?php
+                    ob_start();
+                    ?>
+                    <input type="number" class="small-text" value="1" min="1" max="1" disabled="disabled" />
+                    <input type="hidden" name="vernal_il[max_new_outbound_links_per_source]" value="1" />
                     <?php
                     $this->render_settings_row(
                         __('New links added to each article (per run)', 'vernal-contentum'),
                         ob_get_clean(),
-                        __('When an article is checked, at most this many new outbound links are inserted into that article.', 'vernal-contentum'),
-                        __('Higher = more internal links per article per pass (more SEO wiring, but can feel heavy). Lower = gentler. 2–3 is a safe default.', 'vernal-contentum')
+                        __('Fixed at 1 in this version so the graph can reassess after every insert.', 'vernal-contentum'),
+                        __('Hourly schedule + one edge/pass is the intended pacing.', 'vernal-contentum')
                     );
 
                     ob_start();
@@ -1195,7 +1707,7 @@ class Vernal_Internal_Links {
                         __('Older articles updated for each new post', 'vernal-contentum'),
                         ob_get_clean(),
                         __('When something new is published, up to this many older articles may get a link pointing to the new post.', 'vernal-contentum'),
-                        __('Higher = new posts get more backlinks from old content quickly. Lower = fewer edits to existing posts. 1–2 is usually enough.', 'vernal-contentum')
+                        __('Higher = new posts get more backlinks from old content quickly. Lower = fewer edits to existing posts. 1 is usually enough.', 'vernal-contentum')
                     );
                     ?>
                 </table>
