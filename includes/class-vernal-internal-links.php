@@ -1015,12 +1015,20 @@ class Vernal_Internal_Links {
             }
             $permalink = get_permalink($target_id);
             $anchors = isset($row['anchors']) && is_array($row['anchors']) ? $row['anchors'] : array();
-            if (!$anchors) {
+            $phrase = '';
+            if ($anchors && !empty($anchors[0]['text'])) {
+                $phrase = (string) $anchors[0]['text'];
+            } else {
+                $target_post = get_post($target_id);
+                if ($target_post) {
+                    $phrase = $this->local_ground_phrase($content, $target_post);
+                }
+            }
+            if ($phrase === '') {
                 $bump('no_grounded_anchor');
                 continue;
             }
-            $phrase = isset($anchors[0]['text']) ? (string) $anchors[0]['text'] : '';
-            if ($phrase === '' || $this->is_generic_anchor($phrase) || in_array(strtolower($phrase), $used_anchors, true)) {
+            if ($this->is_generic_anchor($phrase) || in_array(strtolower($phrase), $used_anchors, true)) {
                 $bump('anchor_rejected');
                 continue;
             }
@@ -1171,18 +1179,49 @@ class Vernal_Internal_Links {
     }
 
     private function local_ground_phrase($content, $target_post) {
-        $plain = wp_strip_all_tags($content);
-        $title = get_the_title($target_post);
+        $plain = html_entity_decode(wp_strip_all_tags($content), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $title = html_entity_decode(get_the_title($target_post), ENT_QUOTES | ENT_HTML5, 'UTF-8');
         $candidates = array();
         if ($title) {
-            $words = preg_split('/\s+/', $title);
-            if (count($words) >= 3) {
+            $words = preg_split('/\s+/', trim($title));
+            if (is_array($words) && count($words) >= 2) {
                 $candidates[] = $title;
                 $candidates[] = implode(' ', array_slice($words, 0, 6));
             }
+            // Podcast-style "Guest & Topic" → try guest name / topic separately.
+            foreach (array(' & ', ' and ', ' | ', ' – ', ' — ', ' - ', ': ') as $sep) {
+                if (stripos($title, trim($sep)) === false) {
+                    continue;
+                }
+                $parts = preg_split('/\s*' . preg_quote(trim($sep), '/') . '\s*/i', $title);
+                if (!is_array($parts)) {
+                    continue;
+                }
+                foreach ($parts as $part) {
+                    $part = trim((string) $part);
+                    if ($part === '') {
+                        continue;
+                    }
+                    $candidates[] = $part;
+                    $pw = preg_split('/\s+/', $part);
+                    if (is_array($pw) && count($pw) > 6) {
+                        $candidates[] = implode(' ', array_slice($pw, 0, 6));
+                    }
+                }
+            }
         }
+        $seen = array();
         foreach ($candidates as $c) {
-            if ($c && stripos($plain, $c) !== false) {
+            $c = trim((string) $c);
+            if ($c === '' || strlen($c) < 4) {
+                continue;
+            }
+            $key = strtolower($c);
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+            if (stripos($plain, $c) !== false) {
                 return $c;
             }
         }
