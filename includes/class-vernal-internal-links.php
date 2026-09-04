@@ -101,6 +101,124 @@ class Vernal_Internal_Links {
         return $out;
     }
 
+    /**
+     * Persist social_destination_id into IL settings (+ retrofit option for other tools).
+     *
+     * @param int         $dest_id
+     * @param string|null $label Optional site label for UI cache.
+     */
+    public static function persist_social_destination_id($dest_id, $label = null) {
+        $dest_id = (int) $dest_id;
+        if ($dest_id < 1) {
+            return;
+        }
+        $settings = self::get_settings();
+        $settings['social_destination_id'] = $dest_id;
+        if ($label !== null && $label !== '') {
+            $settings['social_destination_label'] = sanitize_text_field($label);
+        }
+        update_option(self::OPTION_SETTINGS, $settings, false);
+        update_option('vernal_contentum_retrofit_destination_id', $dest_id, false);
+    }
+
+    /**
+     * Resolve WordPress social destination for this site.
+     * Prefers saved IL setting, then retrofit option, then Machine bootstrap by home_url.
+     *
+     * @param bool $persist When true, write a newly resolved id back to options.
+     * @return array{id:int,label:string,source:string,error:string}
+     */
+    public static function resolve_social_destination($persist = true) {
+        $settings = self::get_settings();
+        $id = (int) ($settings['social_destination_id'] ?? 0);
+        $label = isset($settings['social_destination_label']) ? (string) $settings['social_destination_label'] : '';
+        if ($id > 0) {
+            return array(
+                'id'     => $id,
+                'label'  => $label !== '' ? $label : sprintf('Site #%d', $id),
+                'source' => 'settings',
+                'error'  => '',
+            );
+        }
+
+        $retro = (int) get_option('vernal_contentum_retrofit_destination_id', 0);
+        if ($retro > 0) {
+            if ($persist) {
+                self::persist_social_destination_id($retro, $label);
+            }
+            return array(
+                'id'     => $retro,
+                'label'  => $label !== '' ? $label : sprintf('Site #%d', $retro),
+                'source' => 'retrofit',
+                'error'  => '',
+            );
+        }
+
+        if (!class_exists('Vernal_Backend_API') || !Vernal_Backend_API::is_configured()) {
+            return array(
+                'id'     => 0,
+                'label'  => '',
+                'source' => 'none',
+                'error'  => 'backend_not_configured',
+            );
+        }
+
+        $backend_url = Vernal_Backend_API::get_backend_url();
+        $api_key = Vernal_Backend_API::get_api_key();
+        $boot_url = trailingslashit($backend_url) . 'podcasts/retrofit/bootstrap?site_url=' . rawurlencode(home_url('/'));
+        $boot_resp = wp_remote_get($boot_url, array(
+            'headers' => array('X-API-Key' => $api_key),
+            'timeout' => 30,
+        ));
+        if (is_wp_error($boot_resp)) {
+            return array(
+                'id'     => 0,
+                'label'  => '',
+                'source' => 'none',
+                'error'  => 'bootstrap_unreachable',
+            );
+        }
+        $code = (int) wp_remote_retrieve_response_code($boot_resp);
+        if ($code !== 200) {
+            return array(
+                'id'     => 0,
+                'label'  => '',
+                'source' => 'none',
+                'error'  => 'bootstrap_http_' . $code,
+            );
+        }
+        $boot = json_decode(wp_remote_retrieve_body($boot_resp), true);
+        if (!is_array($boot) || empty($boot['resolved_destination_id'])) {
+            return array(
+                'id'     => 0,
+                'label'  => '',
+                'source' => 'none',
+                'error'  => 'no_matching_destination',
+            );
+        }
+        $resolved = (int) $boot['resolved_destination_id'];
+        $resolved_label = '';
+        if (!empty($boot['resolved_destination']) && is_array($boot['resolved_destination'])) {
+            $rd = $boot['resolved_destination'];
+            $resolved_label = (string) ($rd['destination_name'] ?? $rd['site_url'] ?? $rd['name'] ?? '');
+            if ($resolved_label === '' && !empty($rd['site_url'])) {
+                $resolved_label = (string) $rd['site_url'];
+            }
+        }
+        if ($resolved_label === '') {
+            $resolved_label = home_url('/');
+        }
+        if ($persist && $resolved > 0) {
+            self::persist_social_destination_id($resolved, $resolved_label);
+        }
+        return array(
+            'id'     => $resolved,
+            'label'  => $resolved_label,
+            'source' => 'bootstrap',
+            'error'  => '',
+        );
+    }
+
     public function register_schedules($schedules) {
         if (!isset($schedules['weekly'])) {
             $schedules['weekly'] = array(
@@ -263,18 +381,24 @@ class Vernal_Internal_Links {
                 return $summary;
             }
 
-            $dest_id = (int) $settings['social_destination_id'];
-            if ($dest_id < 1) {
-                // Fall back to retrofit destination if set
-                $dest_id = (int) get_option('vernal_contentum_retrofit_destination_id', 0);
-            }
+            $resolved = self::resolve_social_destination(true);
+            $dest_id = (int) ($resolved['id'] ?? 0);
             if ($dest_id < 1) {
                 $summary['status'] = 'error';
                 $summary['errors'] = 1;
-                $summary['message'] = 'social_destination_id is required (set it on the Internal Linking settings page)';
+                $err = (string) ($resolved['error'] ?? '');
+                if ($err === 'backend_not_configured') {
+                    $summary['message'] = 'Connect Vernal first (Connection settings): backend URL and API key are required.';
+                } elseif ($err === 'no_matching_destination') {
+                    $summary['message'] = 'This WordPress site is not linked to a Vernal WordPress destination. Connect the site in Vernal Studio, then try again.';
+                } else {
+                    $summary['message'] = 'Could not resolve Vernal site connection (' . ($err !== '' ? $err : 'unknown') . ').';
+                }
                 $this->finish_run($summary, false);
                 return $summary;
             }
+            // Refresh settings after possible persist
+            $settings = self::get_settings();
 
             $batch = (int) $settings['batch_sources_per_tick'];
             $sources = $this->select_source_posts($settings, $batch, isset($opts['focus_post_ids']) ? $opts['focus_post_ids'] : array());
@@ -338,7 +462,7 @@ class Vernal_Internal_Links {
      * @return WP_Post[]
      */
     public function select_source_posts($settings, $limit, $focus_ids = array()) {
-        $limit = max(1, min(50, (int) $limit));
+        $limit = max(1, min(100, (int) $limit));
         $exclude = self::normalize_id_list($settings['excluded_post_ids']);
         $exclude_cats = self::normalize_id_list($settings['excluded_category_ids']);
 
@@ -1356,7 +1480,7 @@ class Vernal_Internal_Links {
         $out['schedule'] = in_array($sched, array('hourly', 'twicedaily', 'daily', 'weekly'), true) ? $sched : 'hourly';
         $out['max_new_outbound_links_per_source'] = 1; // v1 hard rule
         $out['max_inbound_source_mutations_per_new_target'] = max(0, (int) ($input['max_inbound_source_mutations_per_new_target'] ?? 1));
-        $out['batch_sources_per_tick'] = max(1, min(50, (int) ($input['batch_sources_per_tick'] ?? 25)));
+        $out['batch_sources_per_tick'] = max(1, min(100, (int) ($input['batch_sources_per_tick'] ?? 25)));
         $out['min_relevance_score'] = max(0, min(1, (float) ($input['min_relevance_score'] ?? 0.35)));
         $out['prefer_same_category'] = !empty($input['prefer_same_category']) ? 1 : 0;
         $out['orphan_repair_after_days'] = max(0, (int) ($input['orphan_repair_after_days'] ?? 14));
@@ -1365,10 +1489,15 @@ class Vernal_Internal_Links {
         $out['max_total_internal_links_per_post'] = max(0, (int) ($input['max_total_internal_links_per_post'] ?? 12));
         $out['soft_target_long_form'] = max(3, min(20, (int) ($input['soft_target_long_form'] ?? 8)));
         $out['healthy_cooldown_days'] = max(1, min(60, (int) ($input['healthy_cooldown_days'] ?? 7)));
-        $out['pillar_post_ids'] = self::normalize_id_list($input['pillar_post_ids'] ?? '');
-        $out['excluded_category_ids'] = self::normalize_id_list($input['excluded_category_ids'] ?? '');
-        $out['excluded_post_ids'] = self::normalize_id_list($input['excluded_post_ids'] ?? '');
-        $out['social_destination_id'] = max(0, (int) ($input['social_destination_id'] ?? 0));
+        $out['pillar_post_ids'] = self::normalize_id_list($input['pillar_post_ids'] ?? array());
+        $out['excluded_category_ids'] = self::normalize_id_list($input['excluded_category_ids'] ?? array());
+        $out['excluded_post_ids'] = self::normalize_id_list($input['excluded_post_ids'] ?? array());
+        // Destination is auto-resolved; never wipe a working id from the form.
+        $resolved = self::resolve_social_destination(true);
+        $out['social_destination_id'] = max(0, (int) ($resolved['id'] ?? 0));
+        if (!empty($resolved['label'])) {
+            $out['social_destination_label'] = sanitize_text_field($resolved['label']);
+        }
         $out['process_new_and_modified'] = !empty($input['process_new_and_modified']) ? 1 : 0;
         $out['orphan_repair_enabled'] = !empty($input['orphan_repair_enabled']) ? 1 : 0;
         update_option(self::OPTION_SETTINGS, $out, false);
@@ -1451,11 +1580,199 @@ class Vernal_Internal_Links {
         return isset($map[$status]) ? $map[$status] : (string) $status;
     }
 
+    /**
+     * Category multi-select chips (add from dropdown; remove via X).
+     *
+     * @param string $field_name e.g. excluded_category_ids
+     * @param int[]  $selected_ids
+     */
+    private function render_category_chip_picker($field_name, $selected_ids) {
+        $selected_ids = self::normalize_id_list($selected_ids);
+        $all_cats = get_categories(array(
+            'hide_empty' => false,
+            'orderby'    => 'name',
+            'order'      => 'ASC',
+        ));
+        echo '<div class="vernal-il-chip-picker" data-kind="category">';
+        if ($selected_ids) {
+            echo '<ul class="vernal-il-chips" style="list-style:none;margin:0 0 8px;padding:0;display:flex;flex-wrap:wrap;gap:6px;">';
+            foreach ($selected_ids as $cid) {
+                $term = get_category($cid);
+                $name = ($term && !is_wp_error($term)) ? $term->name : sprintf(__('Category #%d', 'vernal-contentum'), $cid);
+                echo '<li style="display:inline-flex;align-items:center;gap:6px;border:1px solid #c3c4c7;background:#fff;border-radius:4px;padding:4px 8px;">';
+                echo '<span>' . esc_html($name) . '</span>';
+                echo '<input type="hidden" name="vernal_il[' . esc_attr($field_name) . '][]" value="' . (int) $cid . '" />';
+                echo '<button type="button" class="button-link vernal-il-chip-remove" style="color:#b32d2e;text-decoration:none;" aria-label="' . esc_attr__('Remove', 'vernal-contentum') . '">&times;</button>';
+                echo '</li>';
+            }
+            echo '</ul>';
+        } else {
+            echo '<p class="description" style="margin:0 0 8px;">' . esc_html__('None selected.', 'vernal-contentum') . '</p>';
+        }
+        echo '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">';
+        echo '<select class="vernal-il-chip-add-select">';
+        echo '<option value="">' . esc_html__('Select a category…', 'vernal-contentum') . '</option>';
+        foreach ($all_cats as $cat) {
+            if (in_array((int) $cat->term_id, $selected_ids, true)) {
+                continue;
+            }
+            echo '<option value="' . (int) $cat->term_id . '" data-label="' . esc_attr($cat->name) . '">' . esc_html($cat->name) . '</option>';
+        }
+        echo '</select>';
+        echo '<button type="button" class="button vernal-il-chip-add" data-field="' . esc_attr($field_name) . '">' . esc_html__('Add', 'vernal-contentum') . '</button>';
+        echo '</div></div>';
+    }
+
+    /**
+     * Published-post multi-select chips (title shown; id stored).
+     *
+     * @param string $field_name
+     * @param int[]  $selected_ids
+     */
+    private function render_post_chip_picker($field_name, $selected_ids) {
+        $selected_ids = self::normalize_id_list($selected_ids);
+        $posts = get_posts(array(
+            'post_type'              => 'post',
+            'post_status'            => 'publish',
+            'posts_per_page'         => 400,
+            'orderby'                => 'title',
+            'order'                  => 'ASC',
+            'ignore_sticky_posts'    => true,
+            'no_found_rows'          => true,
+            'update_post_meta_cache' => false,
+            'update_post_term_cache' => false,
+        ));
+        // Ensure currently selected posts appear even if outside the 400 window.
+        $by_id = array();
+        foreach ($posts as $p) {
+            $by_id[(int) $p->ID] = $p;
+        }
+        foreach ($selected_ids as $sid) {
+            if (!isset($by_id[$sid])) {
+                $extra = get_post($sid);
+                if ($extra && $extra->post_type === 'post') {
+                    $by_id[$sid] = $extra;
+                }
+            }
+        }
+
+        echo '<div class="vernal-il-chip-picker" data-kind="post">';
+        if ($selected_ids) {
+            echo '<ul class="vernal-il-chips" style="list-style:none;margin:0 0 8px;padding:0;display:flex;flex-wrap:wrap;gap:6px;">';
+            foreach ($selected_ids as $pid) {
+                $p = isset($by_id[$pid]) ? $by_id[$pid] : null;
+                $name = $p ? get_the_title($p) : sprintf(__('Post #%d', 'vernal-contentum'), $pid);
+                if ($name === '') {
+                    $name = sprintf(__('Post #%d', 'vernal-contentum'), $pid);
+                }
+                echo '<li style="display:inline-flex;align-items:center;gap:6px;border:1px solid #c3c4c7;background:#fff;border-radius:4px;padding:4px 8px;max-width:100%;">';
+                echo '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:28rem;">' . esc_html($name) . '</span>';
+                echo '<input type="hidden" name="vernal_il[' . esc_attr($field_name) . '][]" value="' . (int) $pid . '" />';
+                echo '<button type="button" class="button-link vernal-il-chip-remove" style="color:#b32d2e;text-decoration:none;" aria-label="' . esc_attr__('Remove', 'vernal-contentum') . '">&times;</button>';
+                echo '</li>';
+            }
+            echo '</ul>';
+        } else {
+            echo '<p class="description" style="margin:0 0 8px;">' . esc_html__('None selected.', 'vernal-contentum') . '</p>';
+        }
+        echo '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">';
+        echo '<input type="search" class="vernal-il-post-filter regular-text" placeholder="' . esc_attr__('Filter posts by title…', 'vernal-contentum') . '" style="max-width:16rem;" />';
+        echo '<select class="vernal-il-chip-add-select" style="min-width:16rem;max-width:28rem;">';
+        echo '<option value="">' . esc_html__('Select an article…', 'vernal-contentum') . '</option>';
+        foreach ($by_id as $p) {
+            if (in_array((int) $p->ID, $selected_ids, true)) {
+                continue;
+            }
+            $title = get_the_title($p);
+            if ($title === '') {
+                $title = sprintf(__('Post #%d', 'vernal-contentum'), $p->ID);
+            }
+            echo '<option value="' . (int) $p->ID . '" data-label="' . esc_attr($title) . '">' . esc_html($title) . '</option>';
+        }
+        echo '</select>';
+        echo '<button type="button" class="button vernal-il-chip-add" data-field="' . esc_attr($field_name) . '">' . esc_html__('Add', 'vernal-contentum') . '</button>';
+        echo '</div></div>';
+    }
+
+    private function render_chip_picker_script() {
+        static $done = false;
+        if ($done) {
+            return;
+        }
+        $done = true;
+        ?>
+        <script>
+        (function () {
+          function ensureList(picker) {
+            var list = picker.querySelector('.vernal-il-chips');
+            if (!list) {
+              list = document.createElement('ul');
+              list.className = 'vernal-il-chips';
+              list.style.cssText = 'list-style:none;margin:0 0 8px;padding:0;display:flex;flex-wrap:wrap;gap:6px;';
+              picker.insertBefore(list, picker.firstChild);
+              var empty = picker.querySelector('p.description');
+              if (empty) empty.remove();
+            }
+            return list;
+          }
+          document.addEventListener('click', function (e) {
+            var rem = e.target.closest('.vernal-il-chip-remove');
+            if (rem) {
+              e.preventDefault();
+              var li = rem.closest('li');
+              if (li) li.remove();
+              return;
+            }
+            var addBtn = e.target.closest('.vernal-il-chip-add');
+            if (!addBtn) return;
+            e.preventDefault();
+            var picker = addBtn.closest('.vernal-il-chip-picker');
+            if (!picker) return;
+            var sel = picker.querySelector('.vernal-il-chip-add-select');
+            if (!sel || !sel.value) return;
+            var id = sel.value;
+            var label = sel.options[sel.selectedIndex].getAttribute('data-label') || sel.options[sel.selectedIndex].text;
+            var field = addBtn.getAttribute('data-field');
+            var list = ensureList(picker);
+            var li = document.createElement('li');
+            li.style.cssText = 'display:inline-flex;align-items:center;gap:6px;border:1px solid #c3c4c7;background:#fff;border-radius:4px;padding:4px 8px;max-width:100%;';
+            li.innerHTML = '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:28rem;"></span>' +
+              '<input type="hidden" />' +
+              '<button type="button" class="button-link vernal-il-chip-remove" style="color:#b32d2e;text-decoration:none;" aria-label="Remove">&times;</button>';
+            li.querySelector('span').textContent = label;
+            var inp = li.querySelector('input');
+            inp.type = 'hidden';
+            inp.name = 'vernal_il[' + field + '][]';
+            inp.value = id;
+            list.appendChild(li);
+            sel.querySelector('option[value="' + id + '"]').remove();
+            sel.value = '';
+          });
+          document.addEventListener('input', function (e) {
+            if (!e.target.classList.contains('vernal-il-post-filter')) return;
+            var picker = e.target.closest('.vernal-il-chip-picker');
+            if (!picker) return;
+            var q = (e.target.value || '').toLowerCase();
+            var sel = picker.querySelector('.vernal-il-chip-add-select');
+            if (!sel) return;
+            Array.prototype.forEach.call(sel.options, function (opt, i) {
+              if (i === 0) return;
+              var t = (opt.getAttribute('data-label') || opt.text || '').toLowerCase();
+              opt.hidden = q !== '' && t.indexOf(q) === -1;
+            });
+          });
+        })();
+        </script>
+        <?php
+    }
+
     public function render_admin_page() {
         if (!current_user_can('manage_options')) {
             return;
         }
+        $resolved = self::resolve_social_destination(true);
         $settings = self::get_settings();
+        $dest_ok = (int) ($resolved['id'] ?? 0) > 0;
         $last = get_option(self::OPTION_LAST_RUN, array());
         $recent = get_option(self::OPTION_RECENT, array());
         if (!is_array($recent)) {
@@ -1468,7 +1785,8 @@ class Vernal_Internal_Links {
             'daily'      => __('Once a day', 'vernal-contentum'),
             'weekly'     => __('Once a week', 'vernal-contentum'),
         );
-        $dest_missing = empty($settings['social_destination_id']);
+        $connection_url = admin_url('admin.php?page=vernal-contentum');
+        $this->render_chip_picker_script();
         ?>
         <div class="wrap vernal-il-settings">
             <h1><?php esc_html_e('Article Linking', 'vernal-contentum'); ?></h1>
@@ -1476,11 +1794,20 @@ class Vernal_Internal_Links {
                 <?php esc_html_e('This tool adds helpful links inside your blog posts — pointing readers to other related articles on your site. It runs on a schedule (or when you click Run now). It does not change related-news blocks, show pages, or SEO plugin settings.', 'vernal-contentum'); ?>
             </p>
 
-            <?php if ($dest_missing) : ?>
-                <div class="notice notice-warning">
+            <?php if (!$dest_ok) : ?>
+                <div class="notice notice-error">
                     <p>
-                        <strong><?php esc_html_e('Setup needed:', 'vernal-contentum'); ?></strong>
-                        <?php esc_html_e('Enter your Vernal WordPress site ID below before automatic linking can work. Ask your Vernal admin or check WordPress destinations in Vernal if you are not sure of the number.', 'vernal-contentum'); ?>
+                        <strong><?php esc_html_e('Vernal site not connected for linking.', 'vernal-contentum'); ?></strong>
+                        <?php if (($resolved['error'] ?? '') === 'backend_not_configured') : ?>
+                            <?php esc_html_e('Add your Machine backend URL and API key on the Connection page, then return here. Linking cannot run until Vernal can identify this site.', 'vernal-contentum'); ?>
+                        <?php elseif (($resolved['error'] ?? '') === 'no_matching_destination') : ?>
+                            <?php esc_html_e('This WordPress URL is not matched to a WordPress destination in Vernal Studio yet. Connect the site in Studio, then reload this page.', 'vernal-contentum'); ?>
+                        <?php else : ?>
+                            <?php esc_html_e('Could not auto-detect this site in Vernal. Fix the Connection settings or connect the site in Studio.', 'vernal-contentum'); ?>
+                        <?php endif; ?>
+                    </p>
+                    <p>
+                        <a class="button button-primary" href="<?php echo esc_url($connection_url); ?>"><?php esc_html_e('Open Connection settings', 'vernal-contentum'); ?></a>
                     </p>
                 </div>
             <?php endif; ?>
@@ -1502,6 +1829,11 @@ class Vernal_Internal_Links {
                         <strong><?php esc_html_e('Result:', 'vernal-contentum'); ?></strong>
                         <?php echo esc_html($this->humanize_run_status((string) ($last['status'] ?? ''))); ?>
                     </p>
+                    <?php if (!empty($last['message']) && (($last['status'] ?? '') === 'error' || (int) ($last['errors'] ?? 0) > 0)) : ?>
+                        <p class="notice notice-error inline" style="margin:8px 0;padding:8px 12px;">
+                            <?php echo esc_html((string) $last['message']); ?>
+                        </p>
+                    <?php endif; ?>
                     <ul style="list-style:disc;margin-left:18px;font-size:14px;">
                         <li><?php echo esc_html(sprintf(__('Articles checked: %d', 'vernal-contentum'), (int) ($last['scanned'] ?? 0))); ?></li>
                         <li><?php echo esc_html(sprintf(__('Links added: %d', 'vernal-contentum'), (int) ($last['linked'] ?? 0))); ?></li>
@@ -1523,8 +1855,22 @@ class Vernal_Internal_Links {
                 <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-top:12px;">
                     <input type="hidden" name="action" value="vernal_il_run_now" />
                     <?php wp_nonce_field('vernal_il_run_now'); ?>
-                    <?php submit_button(__('Run linking now', 'vernal-contentum'), 'primary', 'submit', false); ?>
-                    <span class="description" style="margin-left:8px;"><?php esc_html_e('Use this to test settings or catch up after a busy publishing day.', 'vernal-contentum'); ?></span>
+                    <?php
+                    submit_button(
+                        __('Run linking now', 'vernal-contentum'),
+                        'primary',
+                        'submit',
+                        false,
+                        $dest_ok ? array() : array('disabled' => 'disabled')
+                    );
+                    ?>
+                    <span class="description" style="margin-left:8px;">
+                        <?php
+                        echo $dest_ok
+                            ? esc_html__('Use this to test settings or catch up after a busy publishing day.', 'vernal-contentum')
+                            : esc_html__('Connect Vernal first — runs cannot start without a site match.', 'vernal-contentum');
+                        ?>
+                    </span>
                 </form>
             </div>
 
@@ -1570,20 +1916,24 @@ class Vernal_Internal_Links {
 
                 <h2><?php esc_html_e('Site connection', 'vernal-contentum'); ?></h2>
                 <p class="description" style="max-width:820px;margin-bottom:12px;">
-                    <?php esc_html_e('Tells Vernal which WordPress site this is, so it only links articles from this site — not another customer\'s site.', 'vernal-contentum'); ?>
+                    <?php esc_html_e('Vernal detects which WordPress destination this site is — you do not need to enter a numeric ID.', 'vernal-contentum'); ?>
                 </p>
                 <table class="form-table" role="presentation">
                     <?php
                     ob_start();
-                    ?>
-                    <input type="number" class="small-text" name="vernal_il[social_destination_id]" value="<?php echo (int) $settings['social_destination_id']; ?>" min="0" />
-                    <?php
-                    $field = ob_get_clean();
+                    if ($dest_ok) {
+                        echo '<p style="margin:0;"><strong>' . esc_html__('Connected', 'vernal-contentum') . '</strong> — ';
+                        echo esc_html($resolved['label'] !== '' ? $resolved['label'] : home_url('/'));
+                        echo ' <span class="description">(' . esc_html(sprintf(__('destination #%d', 'vernal-contentum'), (int) $resolved['id'])) . ')</span></p>';
+                    } else {
+                        echo '<p style="margin:0 0 8px;">' . esc_html__('Not connected.', 'vernal-contentum') . '</p>';
+                        echo '<a class="button" href="' . esc_url($connection_url) . '">' . esc_html__('Connect Vernal', 'vernal-contentum') . '</a>';
+                    }
                     $this->render_settings_row(
-                        __('Vernal WordPress site ID', 'vernal-contentum'),
-                        $field,
-                        __('The numeric ID for this site in Vernal (WordPress destinations). Required for linking to work.', 'vernal-contentum'),
-                        __('If this is 0, linking will not run. Your Vernal admin can look up the correct ID.', 'vernal-contentum')
+                        __('Vernal WordPress site', 'vernal-contentum'),
+                        ob_get_clean(),
+                        __('Matched automatically from this site’s URL when Connection settings are complete.', 'vernal-contentum'),
+                        __('If this shows Not connected, fix Connection or add the site in Vernal Studio — linking will not run until then.', 'vernal-contentum')
                     );
                     ?>
                 </table>
@@ -1625,13 +1975,13 @@ class Vernal_Internal_Links {
 
                     ob_start();
                     ?>
-                    <input type="number" class="small-text" name="vernal_il[batch_sources_per_tick]" value="<?php echo (int) $settings['batch_sources_per_tick']; ?>" min="1" max="50" />
+                    <input type="number" class="small-text" name="vernal_il[batch_sources_per_tick]" value="<?php echo (int) $settings['batch_sources_per_tick']; ?>" min="1" max="100" />
                     <?php
                     $this->render_settings_row(
                         __('Articles checked each run', 'vernal-contentum'),
                         ob_get_clean(),
-                        __('Maximum number of articles WordPress will review in one pass.', 'vernal-contentum'),
-                        __('Higher = more articles processed per run (good for 50–100+ posts/day). Lower = lighter on the server but slower catch-up.', 'vernal-contentum')
+                        __('How many source articles this pass reviews (max 100). The schedule keeps walking the rest of the site on later runs.', 'vernal-contentum'),
+                        __('At ~1000 posts, catch-up takes multiple days even at 100/run because healthy articles are skipped by cooldown. Raise schedule frequency for faster catch-up — do not expect one click to process the whole library.', 'vernal-contentum')
                     );
 
                     ob_start();
@@ -1664,7 +2014,7 @@ class Vernal_Internal_Links {
                         __('Long article soft target', 'vernal-contentum'),
                         ob_get_clean(),
                         __('Recommended number of contextual links for longer posts (about 2,500+ words). Default 8.', 'vernal-contentum'),
-                        __('This is a goal for health reporting, not a forced quota.', 'vernal-contentum')
+                        __('This is a goal for health reporting over many runs, not a forced quota for one pass.', 'vernal-contentum')
                     );
 
                     ob_start();
@@ -1674,26 +2024,24 @@ class Vernal_Internal_Links {
                     $this->render_settings_row(
                         __('Healthy article cooldown (days)', 'vernal-contentum'),
                         ob_get_clean(),
-                        __('After an article looks healthy, wait this many days before reconsidering it (unless it is woken by a related new post or an edit).', 'vernal-contentum'),
-                        __('Higher = less churn on mature pages. Lower = more frequent rechecks.', 'vernal-contentum')
+                        __('After an article is marked healthy, skip re-checking it for this many days (unless it is edited or woken by a related new post).', 'vernal-contentum'),
+                        __('Higher = less churn on mature pages, so batch capacity goes to orphans and underlinked posts. Lower = more frequent rechecks of healthy pages.', 'vernal-contentum')
                     );
 
                     ob_start();
-                    ?>
-                    <input type="text" class="regular-text" name="vernal_il[pillar_post_ids]" value="<?php echo esc_attr(implode(',', $settings['pillar_post_ids'] ?? array())); ?>" placeholder="101, 202" />
-                    <?php
+                    $this->render_post_chip_picker('pillar_post_ids', $settings['pillar_post_ids'] ?? array());
                     $this->render_settings_row(
-                        __('Pillar / authority post IDs', 'vernal-contentum'),
+                        __('Pillar / authority articles', 'vernal-contentum'),
                         ob_get_clean(),
-                        __('Comma-separated WordPress post IDs for main topic pages. These get higher destination importance and a higher soft link allowance.', 'vernal-contentum'),
-                        __('Prefer linking supporting articles up to these pages.', 'vernal-contentum')
+                        __('Main topic pages that supporting articles should prefer linking up to. Pick by title — no need for post IDs.', 'vernal-contentum'),
+                        __('Pillars get higher destination importance and a higher soft link allowance.', 'vernal-contentum')
                     );
                     ?>
                 </table>
 
                 <h2><?php esc_html_e('How many links to add', 'vernal-contentum'); ?></h2>
                 <p class="description" style="max-width:820px;margin-bottom:12px;">
-                    <?php esc_html_e('Each article receives at most one new outbound link per run. Soft maximums stop linking when a page is already well connected.', 'vernal-contentum'); ?>
+                    <?php esc_html_e('These controls are independent: “articles checked” is how many sources you walk; the settings below control how many links each source may receive and how many older posts may link into a new one.', 'vernal-contentum'); ?>
                 </p>
                 <table class="form-table" role="presentation">
                     <?php
@@ -1705,8 +2053,8 @@ class Vernal_Internal_Links {
                     $this->render_settings_row(
                         __('New links added to each article (per run)', 'vernal-contentum'),
                         ob_get_clean(),
-                        __('Fixed at 1 in this version so the graph can reassess after every insert.', 'vernal-contentum'),
-                        __('Hourly schedule + one edge/pass is the intended pacing.', 'vernal-contentum')
+                        __('Fixed at 1 so the topic graph can reassess after every insert. Soft targets (e.g. 8) are reached across many scheduled runs, not in one blast.', 'vernal-contentum'),
+                        __('Hourly schedule + one edge per pass is the intended pacing for quality.', 'vernal-contentum')
                     );
 
                     ob_start();
@@ -1716,8 +2064,8 @@ class Vernal_Internal_Links {
                     $this->render_settings_row(
                         __('Older articles updated for each new post', 'vernal-contentum'),
                         ob_get_clean(),
-                        __('When something new is published, up to this many older articles may get a link pointing to the new post.', 'vernal-contentum'),
-                        __('Higher = new posts get more backlinks from old content quickly. Lower = fewer edits to existing posts. 1 is usually enough.', 'vernal-contentum')
+                        __('Different from “articles checked.” When a recent article is processed, up to this many older articles may get a link pointing to that new post (inbound backfill).', 'vernal-contentum'),
+                        __('Batch size = how many sources you review. This setting = how many backlinks a new post can receive in the same pass. 1 is usually enough.', 'vernal-contentum')
                     );
                     ?>
                 </table>
@@ -1757,7 +2105,7 @@ class Vernal_Internal_Links {
 
                 <h2><?php esc_html_e('Catch-up for older articles', 'vernal-contentum'); ?></h2>
                 <p class="description" style="max-width:820px;margin-bottom:12px;">
-                    <?php esc_html_e('Finds published articles that still have no links added by this tool and tries again.', 'vernal-contentum'); ?>
+                    <?php esc_html_e('Prioritizes published articles that still have no Vernal outbound links (and low inbound) so older inventory gets attention within each batch — still one quality edge at a time.', 'vernal-contentum'); ?>
                 </p>
                 <table class="form-table" role="presentation">
                     <?php
@@ -1776,7 +2124,7 @@ class Vernal_Internal_Links {
                     $this->render_settings_row(
                         __('Orphan catch-up', 'vernal-contentum'),
                         ob_get_clean(),
-                        __('Re-checks older articles that never received a Vernal link.', 'vernal-contentum'),
+                        __('Boosts selection priority for older posts that never received a Vernal link. Complements “articles checked”; does not replace needing a connected site and indexed articles.', 'vernal-contentum'),
                         __('More days = less rework on brand-new posts. Fewer days = faster catch-up on articles that were missed.', 'vernal-contentum')
                     );
                     ?>
@@ -1784,29 +2132,25 @@ class Vernal_Internal_Links {
 
                 <h2><?php esc_html_e('Articles to skip', 'vernal-contentum'); ?></h2>
                 <p class="description" style="max-width:820px;margin-bottom:12px;">
-                    <?php esc_html_e('Optional block list. Show landing pages and non-articles are already skipped automatically.', 'vernal-contentum'); ?>
+                    <?php esc_html_e('Optional block list. Show landing pages and non-articles are already skipped automatically. Separate from RAG Ingestion exclusions.', 'vernal-contentum'); ?>
                 </p>
                 <table class="form-table" role="presentation">
                     <?php
                     ob_start();
-                    ?>
-                    <input type="text" class="regular-text" name="vernal_il[excluded_category_ids]" value="<?php echo esc_attr(implode(',', $settings['excluded_category_ids'])); ?>" placeholder="12, 45" />
-                    <?php
+                    $this->render_category_chip_picker('excluded_category_ids', $settings['excluded_category_ids']);
                     $this->render_settings_row(
-                        __('Excluded category IDs', 'vernal-contentum'),
+                        __('Excluded categories', 'vernal-contentum'),
                         ob_get_clean(),
-                        __('Comma-separated WordPress category IDs. Articles in these categories are never used as source or target.', 'vernal-contentum'),
+                        __('Articles in these categories are never used as source or target for linking.', 'vernal-contentum'),
                         __('Example: exclude press releases or legal pages you never want auto-linked.', 'vernal-contentum')
                     );
 
                     ob_start();
-                    ?>
-                    <input type="text" class="regular-text" name="vernal_il[excluded_post_ids]" value="<?php echo esc_attr(implode(',', $settings['excluded_post_ids'])); ?>" placeholder="101, 202" />
-                    <?php
+                    $this->render_post_chip_picker('excluded_post_ids', $settings['excluded_post_ids']);
                     $this->render_settings_row(
-                        __('Excluded post IDs', 'vernal-contentum'),
+                        __('Excluded articles', 'vernal-contentum'),
                         ob_get_clean(),
-                        __('Comma-separated WordPress post IDs to never touch.', 'vernal-contentum'),
+                        __('Specific posts to never touch. Pick by title.', 'vernal-contentum'),
                         __('Use for cornerstone pages or posts you edit by hand only.', 'vernal-contentum')
                     );
                     ?>
@@ -1894,14 +2238,14 @@ class Vernal_Internal_Links {
                         <td><?php echo esc_html($row['inserted_at'] ?? ''); ?></td>
                         <td>
                             <?php if ($source_id) : ?>
-                                <a href="<?php echo esc_url(get_edit_post_link($source_id, 'raw')); ?>">#<?php echo (int) $source_id; ?></a>
+                                <a href="<?php echo esc_url(get_edit_post_link($source_id, 'raw')); ?>"><?php echo esc_html(get_the_title($source_id) ?: ('#' . $source_id)); ?></a>
                             <?php else : ?>
                                 —
                             <?php endif; ?>
                         </td>
                         <td>
                             <?php if ($target_id) : ?>
-                                <a href="<?php echo esc_url(get_edit_post_link($target_id, 'raw')); ?>">#<?php echo (int) $target_id; ?></a>
+                                <a href="<?php echo esc_url(get_edit_post_link($target_id, 'raw')); ?>"><?php echo esc_html(get_the_title($target_id) ?: ('#' . $target_id)); ?></a>
                             <?php else : ?>
                                 —
                             <?php endif; ?>
