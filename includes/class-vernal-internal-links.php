@@ -17,6 +17,7 @@ class Vernal_Internal_Links {
     const OPTION_RECENT   = 'vernal_contentum_il_recent_mutations';
     const CRON_HOOK       = 'vernal_il_cron_tick';
     const CRON_RECONCILE  = 'vernal_il_reconcile_tick';
+    const CRON_MANUAL     = 'vernal_il_manual_run';
     const META_PASS_AT    = '_vernal_il_pass_at';
     const META_SRC_MOD    = '_vernal_il_source_modified_gmt';
     const META_FP         = '_vernal_il_content_fp';
@@ -38,10 +39,14 @@ class Vernal_Internal_Links {
         add_filter('cron_schedules', array($this, 'register_schedules'));
         add_action(self::CRON_HOOK, array($this, 'cron_tick'));
         add_action(self::CRON_RECONCILE, array($this, 'reconcile_inbound_cache'));
+        add_action(self::CRON_MANUAL, array($this, 'cron_manual_run'));
         add_action('save_post_post', array($this, 'maybe_enqueue_on_save'), 20, 3);
         add_action('admin_post_vernal_il_run_now', array($this, 'handle_run_now'));
+        add_action('admin_post_vernal_il_clear_lock', array($this, 'handle_clear_lock'));
         add_action('admin_post_vernal_il_undo', array($this, 'handle_undo'));
         add_action('admin_post_vernal_il_save_settings', array($this, 'handle_save_settings'));
+        add_action('wp_ajax_vernal_il_run_status', array($this, 'ajax_run_status'));
+        add_action('wp_ajax_vernal_il_run_worker', array($this, 'ajax_run_worker'));
         add_action('init', array($this, 'ensure_cron_scheduled'));
     }
 
@@ -269,6 +274,166 @@ class Vernal_Internal_Links {
         $this->run_pass('cron');
     }
 
+    /** Background worker for "Run linking now" (decoupled from browser request). */
+    public function cron_manual_run() {
+        $this->run_pass('manual_run');
+    }
+
+    /**
+     * Queue a manual run and kick WP-Cron / loopback without blocking the browser.
+     *
+     * @return array{ok:bool,status:string,message:string,run_id?:string}
+     */
+    public function queue_manual_run() {
+        $lock = get_option(self::OPTION_LOCK, null);
+        $now = time();
+        if (is_array($lock) && !empty($lock['lease_expires_at']) && (int) $lock['lease_expires_at'] > $now) {
+            $last = get_option(self::OPTION_LAST_RUN, array());
+            return array(
+                'ok'      => true,
+                'status'  => 'running',
+                'message' => __('A linking run is already in progress. Progress is shown below.', 'vernal-contentum'),
+                'run_id'  => isset($last['run_id']) ? (string) $last['run_id'] : (string) ($lock['run_id'] ?? ''),
+            );
+        }
+
+        $queued = array(
+            'run_id'          => 'queued_' . gmdate('YmdHis'),
+            'started_at'      => gmdate('c'),
+            'completed_at'    => null,
+            'status'          => 'queued',
+            'scanned'         => 0,
+            'linked'          => 0,
+            'skipped'         => 0,
+            'errors'          => 0,
+            'trigger'         => 'manual_run',
+            'progress_total'  => 0,
+            'progress_current'=> 0,
+            'progress_label'  => __('Starting…', 'vernal-contentum'),
+            'skip_reasons'    => array(),
+            'sample_notes'    => array(),
+            'message'         => __('Linking run queued — working in the background.', 'vernal-contentum'),
+        );
+        update_option(self::OPTION_LAST_RUN, $queued, false);
+
+        // Single-event cron + spawn so the work survives page refresh / Save settings.
+        if (!wp_next_scheduled(self::CRON_MANUAL)) {
+            wp_schedule_single_event(time(), self::CRON_MANUAL);
+        }
+        if (function_exists('spawn_cron')) {
+            spawn_cron(time());
+        }
+
+        // Non-blocking loopback as a second kick (hosts with disabled WP-Cron).
+        $url = admin_url('admin-ajax.php');
+        wp_remote_post($url, array(
+            'timeout'   => 0.01,
+            'blocking'  => false,
+            'sslverify' => apply_filters('https_local_ssl_verify', false),
+            'cookies'   => isset($_COOKIE) ? $_COOKIE : array(),
+            'body'      => array(
+                'action'   => 'vernal_il_run_worker',
+                '_ajax_nonce' => wp_create_nonce('vernal_il_run_worker'),
+            ),
+        ));
+
+        return array(
+            'ok'      => true,
+            'status'  => 'queued',
+            'message' => $queued['message'],
+            'run_id'  => $queued['run_id'],
+        );
+    }
+
+    public function ajax_run_status() {
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'forbidden'), 403);
+        }
+        check_ajax_referer('vernal_il_run_status', 'nonce');
+        wp_send_json_success($this->get_run_status_payload());
+    }
+
+    public function ajax_run_worker() {
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'forbidden'), 403);
+        }
+        // Soft nonce: loopback may omit it; capability check is the gate.
+        if (isset($_REQUEST['_ajax_nonce'])) {
+            check_ajax_referer('vernal_il_run_worker', '_ajax_nonce', false);
+        }
+        $lock = get_option(self::OPTION_LOCK, null);
+        $now = time();
+        if (is_array($lock) && !empty($lock['lease_expires_at']) && (int) $lock['lease_expires_at'] > $now) {
+            wp_send_json_success(array('status' => 'already_running'));
+            return;
+        }
+        $ts = wp_next_scheduled(self::CRON_MANUAL);
+        if ($ts) {
+            wp_unschedule_event($ts, self::CRON_MANUAL);
+        }
+        @ignore_user_abort(true);
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(600);
+        }
+        $summary = $this->run_pass('manual_run');
+        wp_send_json_success(array('status' => $summary['status'] ?? 'completed', 'summary' => $summary));
+    }
+
+    public function get_run_status_payload() {
+        $last = get_option(self::OPTION_LAST_RUN, array());
+        if (!is_array($last)) {
+            $last = array();
+        }
+        $lock = get_option(self::OPTION_LOCK, null);
+        $now = time();
+        $lock_active = is_array($lock) && !empty($lock['lease_expires_at']) && (int) $lock['lease_expires_at'] > $now;
+        $status = (string) ($last['status'] ?? '');
+        $in_progress = $lock_active || in_array($status, array('queued', 'running'), true);
+        $total = max(0, (int) ($last['progress_total'] ?? 0));
+        $current = max(0, (int) ($last['progress_current'] ?? $last['scanned'] ?? 0));
+        $pct = 0;
+        if ($total > 0) {
+            $pct = (int) min(100, round(($current / $total) * 100));
+        } elseif ($in_progress && $status === 'queued') {
+            $pct = 2;
+        } elseif ($in_progress) {
+            $pct = max(5, min(95, $current > 0 ? 50 : 10));
+        } elseif ($status === 'completed' || $status === 'error') {
+            $pct = 100;
+        }
+        return array(
+            'in_progress'     => $in_progress,
+            'lock_active'     => $lock_active,
+            'status'          => $status,
+            'status_label'    => $this->humanize_run_status($status),
+            'message'         => (string) ($last['message'] ?? ''),
+            'scanned'         => (int) ($last['scanned'] ?? 0),
+            'linked'          => (int) ($last['linked'] ?? 0),
+            'skipped'         => (int) ($last['skipped'] ?? 0),
+            'errors'          => (int) ($last['errors'] ?? 0),
+            'progress_total'  => $total,
+            'progress_current'=> $current,
+            'progress_label'  => (string) ($last['progress_label'] ?? ''),
+            'progress_pct'    => $pct,
+            'skip_reasons'    => isset($last['skip_reasons']) && is_array($last['skip_reasons']) ? $last['skip_reasons'] : array(),
+            'sample_notes'    => isset($last['sample_notes']) && is_array($last['sample_notes']) ? $last['sample_notes'] : array(),
+            'run_id'          => (string) ($last['run_id'] ?? ''),
+            'completed_at'    => (string) ($last['completed_at'] ?? ''),
+            'started_at'      => (string) ($last['started_at'] ?? ''),
+            'lease_expires_at'=> $lock_active ? (int) $lock['lease_expires_at'] : 0,
+        );
+    }
+
+    private function persist_run_progress($summary) {
+        update_option(self::OPTION_LAST_RUN, $summary, false);
+        // Refresh lock lease while work continues
+        $lock = get_option(self::OPTION_LOCK, null);
+        if (is_array($lock) && !empty($lock['run_id']) && isset($summary['run_id']) && $lock['run_id'] === $summary['run_id']) {
+            $lock['lease_expires_at'] = time() + self::LEASE_SECONDS;
+            update_option(self::OPTION_LOCK, $lock, false);
+        }
+    }
+
     /**
      * Nightly: recompute derived inbound counts from a wider post sample.
      */
@@ -345,27 +510,42 @@ class Vernal_Internal_Links {
         $settings = self::get_settings();
         $run_id = $this->acquire_lock();
         if (is_wp_error($run_id)) {
-            return array(
+            $payload = array(
                 'status'  => 'skipped_locked',
-                'errors'  => 1,
-                'message' => $run_id->get_error_message(),
+                'errors'  => 0,
+                'scanned' => 0,
+                'linked'  => 0,
+                'skipped' => 0,
+                'message' => $run_id->get_error_message() . ' ' . __('Refresh this page to watch progress, or clear a stuck run if it is older than 15 minutes.', 'vernal-contentum'),
+                'trigger' => $trigger,
             );
+            // Do not overwrite an in-progress LAST_RUN with zeros — keep live progress.
+            $existing = get_option(self::OPTION_LAST_RUN, array());
+            if (is_array($existing) && in_array(($existing['status'] ?? ''), array('queued', 'running'), true)) {
+                $existing['message'] = $payload['message'];
+                return $existing;
+            }
+            return $payload;
         }
 
         $summary = array(
-            'run_id'       => $run_id,
-            'started_at'   => gmdate('c'),
-            'completed_at' => null,
-            'status'       => 'running',
-            'scanned'      => 0,
-            'linked'       => 0,
-            'skipped'      => 0,
-            'errors'       => 0,
-            'trigger'      => $trigger,
-            'skip_reasons' => array(),
-            'sample_notes' => array(),
-            'message'      => '',
+            'run_id'          => $run_id,
+            'started_at'      => gmdate('c'),
+            'completed_at'    => null,
+            'status'          => 'running',
+            'scanned'         => 0,
+            'linked'          => 0,
+            'skipped'         => 0,
+            'errors'          => 0,
+            'trigger'         => $trigger,
+            'skip_reasons'    => array(),
+            'sample_notes'    => array(),
+            'message'         => __('Linking run in progress…', 'vernal-contentum'),
+            'progress_total'  => 0,
+            'progress_current'=> 0,
+            'progress_label'  => __('Preparing articles…', 'vernal-contentum'),
         );
+        $this->persist_run_progress($summary);
 
         $meaningful = false;
         $bump_reason = function (&$summary, $code, $n = 1) {
@@ -427,8 +607,22 @@ class Vernal_Internal_Links {
             $settings = self::get_settings();
 
             $batch = (int) $settings['batch_sources_per_tick'];
-            $sources = $this->select_source_posts($settings, $batch, isset($opts['focus_post_ids']) ? $opts['focus_post_ids'] : array());
+            // Manual runs force a fresh look at eligible posts (ignore cooldown stamps from empty prior passes).
+            $force = ($trigger === 'manual_run');
+            $sources = $this->select_source_posts(
+                $settings,
+                $batch,
+                isset($opts['focus_post_ids']) ? $opts['focus_post_ids'] : array(),
+                $force
+            );
             $meaningful = !empty($sources);
+            $summary['progress_total'] = count($sources);
+            $summary['progress_current'] = 0;
+            $summary['progress_label'] = $meaningful
+                ? sprintf(__('Checking %d articles…', 'vernal-contentum'), count($sources))
+                : __('No eligible articles found', 'vernal-contentum');
+            $this->persist_run_progress($summary);
+
             if (!$meaningful) {
                 $summary['message'] = 'No eligible articles to check this pass (all filtered, cooling down, or excluded).';
                 $bump_reason($summary, 'no_eligible_sources');
@@ -436,6 +630,13 @@ class Vernal_Internal_Links {
 
             foreach ($sources as $post) {
                 $summary['scanned']++;
+                $summary['progress_current'] = $summary['scanned'];
+                $summary['progress_label'] = sprintf(
+                    __('Checking: %s', 'vernal-contentum'),
+                    get_the_title($post) ?: ('#' . (int) $post->ID)
+                );
+                $this->persist_run_progress($summary);
+
                 $result = $this->process_source_outbound($post, $settings, $run_id, $dest_id, $trigger);
                 if (!empty($result['linked'])) {
                     $summary['linked'] += (int) $result['linked'];
@@ -516,7 +717,7 @@ class Vernal_Internal_Links {
      * @param array $focus_ids
      * @return WP_Post[]
      */
-    public function select_source_posts($settings, $limit, $focus_ids = array()) {
+    public function select_source_posts($settings, $limit, $focus_ids = array(), $force_eligible = false) {
         $limit = max(1, min(100, (int) $limit));
         $exclude = self::normalize_id_list($settings['excluded_post_ids']);
         $exclude_cats = self::normalize_id_list($settings['excluded_category_ids']);
@@ -553,6 +754,10 @@ class Vernal_Internal_Links {
 
         $q = new WP_Query($args);
         $eligible = $this->filter_eligible_posts($q->posts, $settings);
+
+        if ($force_eligible) {
+            return array_slice($eligible, 0, $limit);
+        }
 
         // Prefer those needing a pass
         $needs = array();
@@ -778,9 +983,8 @@ class Vernal_Internal_Links {
         ));
         if (is_wp_error($resp)) {
             $out['errors']++;
-            $out['note'] = 'machine_error: ' . $resp->get_error_message();
             $bump('machine_request_failed');
-            // bump already incremented skipped; for errors we still want the reason visible
+            $out['note'] = 'machine_error: ' . $resp->get_error_message();
             return $out;
         }
         $results = isset($resp['results']) && is_array($resp['results']) ? $resp['results'] : array();
@@ -1523,16 +1727,41 @@ class Vernal_Internal_Links {
             wp_die(__('Forbidden', 'vernal-contentum'));
         }
         check_admin_referer('vernal_il_run_now');
-        $summary = $this->run_pass('manual_run');
+        $queued = $this->queue_manual_run();
         $redirect = add_query_arg(
             array(
-                'page'           => 'vernal-contentum-internal-links',
-                'vernal_il_done' => 1,
-                'status'         => isset($summary['status']) ? $summary['status'] : '',
+                'page'             => 'vernal-contentum-internal-links',
+                'vernal_il_queued' => 1,
+                'status'           => isset($queued['status']) ? $queued['status'] : 'queued',
             ),
             admin_url('admin.php')
         );
         wp_safe_redirect($redirect);
+        exit;
+    }
+
+    public function handle_clear_lock() {
+        if (!current_user_can('manage_options')) {
+            wp_die(__('Forbidden', 'vernal-contentum'));
+        }
+        check_admin_referer('vernal_il_clear_lock');
+        delete_option(self::OPTION_LOCK);
+        $ts = wp_next_scheduled(self::CRON_MANUAL);
+        if ($ts) {
+            wp_unschedule_event($ts, self::CRON_MANUAL);
+        }
+        $last = get_option(self::OPTION_LAST_RUN, array());
+        if (is_array($last) && in_array(($last['status'] ?? ''), array('queued', 'running', 'skipped_locked'), true)) {
+            $last['status'] = 'error';
+            $last['message'] = __('Stuck run cleared by admin. You can start a new run.', 'vernal-contentum');
+            $last['completed_at'] = gmdate('c');
+            $last['progress_label'] = '';
+            update_option(self::OPTION_LAST_RUN, $last, false);
+        }
+        wp_safe_redirect(add_query_arg(
+            array('page' => 'vernal-contentum-internal-links', 'vernal_il_lock_cleared' => 1),
+            admin_url('admin.php')
+        ));
         exit;
     }
 
@@ -1658,10 +1887,11 @@ class Vernal_Internal_Links {
     private function humanize_run_status($status) {
         $map = array(
             'completed'     => __('Finished successfully', 'vernal-contentum'),
-            'running'       => __('Still running', 'vernal-contentum'),
+            'running'       => __('Running in the background…', 'vernal-contentum'),
+            'queued'        => __('Queued — starting shortly…', 'vernal-contentum'),
             'error'         => __('Stopped with errors', 'vernal-contentum'),
             'disabled'      => __('Automatic linking is turned off', 'vernal-contentum'),
-            'skipped_locked'=> __('Skipped — another run was already in progress', 'vernal-contentum'),
+            'skipped_locked'=> __('Another run was already in progress', 'vernal-contentum'),
         );
         return isset($map[$status]) ? $map[$status] : (string) $status;
     }
@@ -1914,40 +2144,65 @@ class Vernal_Internal_Links {
             <?php endif; ?>
 
             <?php if (!empty($_GET['settings-updated'])) : ?>
-                <div class="notice notice-success is-dismissible"><p><?php esc_html_e('Settings saved.', 'vernal-contentum'); ?></p></div>
+                <div class="notice notice-success is-dismissible"><p><?php esc_html_e('Settings saved. Any linking run in progress continues in the background.', 'vernal-contentum'); ?></p></div>
+            <?php endif; ?>
+            <?php if (!empty($_GET['vernal_il_queued'])) : ?>
+                <div class="notice notice-info is-dismissible"><p><?php esc_html_e('Linking run started in the background. You can leave this page or save settings — progress updates below.', 'vernal-contentum'); ?></p></div>
             <?php endif; ?>
             <?php if (!empty($_GET['vernal_il_done'])) : ?>
                 <div class="notice notice-success is-dismissible"><p><?php esc_html_e('Manual run finished.', 'vernal-contentum'); ?> <?php echo esc_html(isset($_GET['status']) ? (string) $_GET['status'] : ''); ?></p></div>
+            <?php endif; ?>
+            <?php if (!empty($_GET['vernal_il_lock_cleared'])) : ?>
+                <div class="notice notice-success is-dismissible"><p><?php esc_html_e('Stuck run cleared. You can start a new run.', 'vernal-contentum'); ?></p></div>
             <?php endif; ?>
             <?php if (!empty($_GET['vernal_il_undone'])) : ?>
                 <div class="notice notice-success is-dismissible"><p><?php esc_html_e('That link was removed. The text in the article was kept.', 'vernal-contentum'); ?></p></div>
             <?php endif; ?>
 
-            <div style="background:#fff;border:1px solid #ccd0d4;padding:16px 20px;margin:20px 0;max-width:920px;">
+            <?php
+            $status_payload = $this->get_run_status_payload();
+            $in_progress = !empty($status_payload['in_progress']);
+            ?>
+            <div id="vernal-il-activity" style="background:#fff;border:1px solid #ccd0d4;padding:16px 20px;margin:20px 0;max-width:920px;"
+                 data-ajax-url="<?php echo esc_url(admin_url('admin-ajax.php')); ?>"
+                 data-nonce="<?php echo esc_attr(wp_create_nonce('vernal_il_run_status')); ?>"
+                 data-in-progress="<?php echo $in_progress ? '1' : '0'; ?>">
                 <h2 style="margin-top:0;"><?php esc_html_e('Latest activity', 'vernal-contentum'); ?></h2>
-                <?php if (is_array($last) && !empty($last['run_id'])) : ?>
-                    <p style="font-size:14px;">
-                        <strong><?php esc_html_e('Result:', 'vernal-contentum'); ?></strong>
-                        <?php echo esc_html($this->humanize_run_status((string) ($last['status'] ?? ''))); ?>
+
+                <div id="vernal-il-progress-wrap" style="<?php echo $in_progress ? '' : 'display:none;'; ?>margin:12px 0 16px;">
+                    <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px;">
+                        <strong id="vernal-il-progress-status"><?php echo esc_html($status_payload['status_label']); ?></strong>
+                        <span id="vernal-il-progress-pct"><?php echo (int) $status_payload['progress_pct']; ?>%</span>
+                    </div>
+                    <div style="height:12px;background:#dcdcde;border-radius:6px;overflow:hidden;">
+                        <div id="vernal-il-progress-bar" style="height:100%;width:<?php echo (int) $status_payload['progress_pct']; ?>%;background:#2271b1;transition:width .3s ease;"></div>
+                    </div>
+                    <p id="vernal-il-progress-label" class="description" style="margin:8px 0 0;">
+                        <?php echo esc_html($status_payload['progress_label']); ?>
                     </p>
-                    <?php if (!empty($last['message'])) : ?>
-                        <p class="notice <?php echo (($last['status'] ?? '') === 'error' || (int) ($last['errors'] ?? 0) > 0) ? 'notice-error' : 'notice-warning'; ?> inline" style="margin:8px 0;padding:8px 12px;">
-                            <?php echo esc_html((string) $last['message']); ?>
-                        </p>
-                    <?php endif; ?>
-                    <ul style="list-style:disc;margin-left:18px;font-size:14px;">
-                        <li><?php echo esc_html(sprintf(__('Articles checked: %d', 'vernal-contentum'), (int) ($last['scanned'] ?? 0))); ?></li>
-                        <li><?php echo esc_html(sprintf(__('Links added: %d', 'vernal-contentum'), (int) ($last['linked'] ?? 0))); ?></li>
-                        <li><?php echo esc_html(sprintf(__('Skipped (no good match or already linked): %d', 'vernal-contentum'), (int) ($last['skipped'] ?? 0))); ?></li>
-                        <li><?php echo esc_html(sprintf(__('Errors: %d', 'vernal-contentum'), (int) ($last['errors'] ?? 0))); ?></li>
-                    </ul>
+                </div>
+
+                <p style="font-size:14px;" id="vernal-il-result-line">
+                    <strong><?php esc_html_e('Result:', 'vernal-contentum'); ?></strong>
+                    <span id="vernal-il-result-text"><?php echo esc_html($status_payload['status_label'] !== '' ? $status_payload['status_label'] : __('No runs yet', 'vernal-contentum')); ?></span>
+                </p>
+                <p id="vernal-il-message" class="notice notice-warning inline" style="margin:8px 0;padding:8px 12px;<?php echo empty($status_payload['message']) ? 'display:none;' : ''; ?>">
+                    <?php echo esc_html($status_payload['message']); ?>
+                </p>
+                <ul style="list-style:disc;margin-left:18px;font-size:14px;" id="vernal-il-counts">
+                    <li><?php esc_html_e('Articles checked:', 'vernal-contentum'); ?> <strong id="vernal-il-scanned"><?php echo (int) $status_payload['scanned']; ?></strong></li>
+                    <li><?php esc_html_e('Links added:', 'vernal-contentum'); ?> <strong id="vernal-il-linked"><?php echo (int) $status_payload['linked']; ?></strong></li>
+                    <li><?php esc_html_e('Skipped:', 'vernal-contentum'); ?> <strong id="vernal-il-skipped"><?php echo (int) $status_payload['skipped']; ?></strong></li>
+                    <li><?php esc_html_e('Errors:', 'vernal-contentum'); ?> <strong id="vernal-il-errors"><?php echo (int) $status_payload['errors']; ?></strong></li>
+                </ul>
+                <div id="vernal-il-why-wrap">
                     <?php
-                    $reasons = isset($last['skip_reasons']) && is_array($last['skip_reasons']) ? $last['skip_reasons'] : array();
+                    $reasons = $status_payload['skip_reasons'];
                     if ($reasons) :
                         arsort($reasons);
                         ?>
                         <h3 style="margin:16px 0 6px;font-size:14px;"><?php esc_html_e('Why nothing (or little) linked', 'vernal-contentum'); ?></h3>
-                        <ul style="list-style:disc;margin-left:18px;font-size:13px;">
+                        <ul style="list-style:disc;margin-left:18px;font-size:13px;" id="vernal-il-why-list">
                             <?php foreach ($reasons as $code => $count) : ?>
                                 <li>
                                     <?php echo esc_html($this->humanize_skip_reason((string) $code)); ?>
@@ -1957,52 +2212,151 @@ class Vernal_Internal_Links {
                             <?php endforeach; ?>
                         </ul>
                     <?php endif; ?>
-                    <?php
-                    $samples = isset($last['sample_notes']) && is_array($last['sample_notes']) ? $last['sample_notes'] : array();
-                    if ($samples) :
-                        ?>
-                        <details style="margin-top:10px;">
-                            <summary style="cursor:pointer;font-size:13px;"><?php esc_html_e('Sample articles from this run', 'vernal-contentum'); ?></summary>
-                            <ul style="list-style:disc;margin:8px 0 0 18px;font-size:12px;">
-                                <?php foreach ($samples as $line) : ?>
-                                    <li><?php echo esc_html((string) $line); ?></li>
-                                <?php endforeach; ?>
-                            </ul>
-                        </details>
+                </div>
+                <p class="description" id="vernal-il-meta">
+                    <?php echo esc_html($status_payload['completed_at'] ?: $status_payload['started_at']); ?>
+                    <?php if (!empty($status_payload['run_id'])) : ?>
+                        <span> · <?php echo esc_html($status_payload['run_id']); ?></span>
                     <?php endif; ?>
-                    <p class="description">
-                        <?php echo esc_html($last['completed_at'] ?? $last['started_at'] ?? ''); ?>
-                        <?php if (!empty($last['run_id'])) : ?>
-                            <span> · <?php echo esc_html($last['run_id']); ?></span>
-                        <?php endif; ?>
-                    </p>
-                <?php else : ?>
-                    <p><?php esc_html_e('No automatic or manual runs yet.', 'vernal-contentum'); ?></p>
-                <?php endif; ?>
-                <?php if (is_array($lock) && !empty($lock['lease_expires_at']) && (int) $lock['lease_expires_at'] > time()) : ?>
-                    <p><em><?php esc_html_e('A run is in progress right now. Wait for it to finish before starting another.', 'vernal-contentum'); ?></em></p>
-                <?php endif; ?>
-                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-top:12px;">
-                    <input type="hidden" name="action" value="vernal_il_run_now" />
-                    <?php wp_nonce_field('vernal_il_run_now'); ?>
-                    <?php
-                    submit_button(
-                        __('Run linking now', 'vernal-contentum'),
-                        'primary',
-                        'submit',
-                        false,
-                        $dest_ok ? array() : array('disabled' => 'disabled')
-                    );
-                    ?>
-                    <span class="description" style="margin-left:8px;">
+                </p>
+
+                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px;">
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:0;">
+                        <input type="hidden" name="action" value="vernal_il_run_now" />
+                        <?php wp_nonce_field('vernal_il_run_now'); ?>
                         <?php
-                        echo $dest_ok
-                            ? esc_html__('Use this to test settings or catch up after a busy publishing day.', 'vernal-contentum')
-                            : esc_html__('Connect Vernal first — runs cannot start without a site match.', 'vernal-contentum');
+                        submit_button(
+                            __('Run linking now', 'vernal-contentum'),
+                            'primary',
+                            'submit',
+                            false,
+                            ($dest_ok && !$in_progress) ? array('id' => 'vernal-il-run-btn') : array('id' => 'vernal-il-run-btn', 'disabled' => 'disabled')
+                        );
+                        ?>
+                    </form>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:0;">
+                        <input type="hidden" name="action" value="vernal_il_clear_lock" />
+                        <?php wp_nonce_field('vernal_il_clear_lock'); ?>
+                        <?php
+                        submit_button(
+                            __('Clear stuck run', 'vernal-contentum'),
+                            'secondary',
+                            'submit',
+                            false,
+                            array('id' => 'vernal-il-clear-btn')
+                        );
+                        ?>
+                    </form>
+                    <span class="description" id="vernal-il-run-hint">
+                        <?php
+                        if (!$dest_ok) {
+                            esc_html_e('Connect Vernal first — runs cannot start without a site match.', 'vernal-contentum');
+                        } elseif ($in_progress) {
+                            esc_html_e('Run in progress — safe to refresh or save settings; this bar keeps updating.', 'vernal-contentum');
+                        } else {
+                            esc_html_e('Starts in the background so refreshing or saving settings will not stop it.', 'vernal-contentum');
+                        }
                         ?>
                     </span>
-                </form>
+                </div>
             </div>
+            <script>
+            (function () {
+              var root = document.getElementById('vernal-il-activity');
+              if (!root) return;
+              var ajaxUrl = root.getAttribute('data-ajax-url');
+              var nonce = root.getAttribute('data-nonce');
+              var timer = null;
+              var reasonLabels = <?php echo wp_json_encode(array(
+                  'no_eligible_sources' => __('No eligible articles this pass (cooldown, exclusions, or filters)', 'vernal-contentum'),
+                  'already_at_link_cap' => __('Article already at max links', 'vernal-contentum'),
+                  'machine_request_failed' => __('Could not reach Vernal match API', 'vernal-contentum'),
+                  'no_machine_candidates' => __('Vernal found no related article (often empty RAG index or gates)', 'vernal-contentum'),
+                  'below_min_relevance' => __('Best match scored below minimum relatedness', 'vernal-contentum'),
+                  'invalid_or_excluded_target' => __('Suggested target was invalid or excluded', 'vernal-contentum'),
+                  'no_grounded_anchor' => __('No usable link phrase in the article body', 'vernal-contentum'),
+                  'anchor_rejected' => __('Link phrase was generic or already used', 'vernal-contentum'),
+                  'phrase_not_found_in_body' => __('Suggested phrase was not found in the article text', 'vernal-contentum'),
+              )); ?>;
+
+              function setText(id, text) {
+                var el = document.getElementById(id);
+                if (el) el.textContent = text == null ? '' : String(text);
+              }
+              function apply(data) {
+                if (!data) return;
+                var wrap = document.getElementById('vernal-il-progress-wrap');
+                var bar = document.getElementById('vernal-il-progress-bar');
+                var btn = document.getElementById('vernal-il-run-btn');
+                if (wrap) wrap.style.display = data.in_progress ? '' : (data.status === 'completed' || data.status === 'error' ? '' : wrap.style.display);
+                if (data.in_progress && wrap) wrap.style.display = '';
+                if (!data.in_progress && (data.status === 'completed' || data.status === 'error') && wrap) {
+                  // keep bar visible at 100% briefly
+                  wrap.style.display = '';
+                }
+                if (bar) bar.style.width = (data.progress_pct || 0) + '%';
+                setText('vernal-il-progress-pct', (data.progress_pct || 0) + '%');
+                setText('vernal-il-progress-status', data.status_label || data.status || '');
+                setText('vernal-il-progress-label', data.progress_label || '');
+                setText('vernal-il-result-text', data.status_label || data.status || '');
+                setText('vernal-il-scanned', data.scanned || 0);
+                setText('vernal-il-linked', data.linked || 0);
+                setText('vernal-il-skipped', data.skipped || 0);
+                setText('vernal-il-errors', data.errors || 0);
+                var msg = document.getElementById('vernal-il-message');
+                if (msg) {
+                  if (data.message) {
+                    msg.style.display = '';
+                    msg.textContent = data.message;
+                  } else {
+                    msg.style.display = 'none';
+                  }
+                }
+                var meta = [];
+                if (data.completed_at) meta.push(data.completed_at);
+                else if (data.started_at) meta.push(data.started_at);
+                if (data.run_id) meta.push(data.run_id);
+                setText('vernal-il-meta', meta.join(' · '));
+                if (btn) {
+                  if (data.in_progress) btn.setAttribute('disabled', 'disabled');
+                  else btn.removeAttribute('disabled');
+                }
+                var why = document.getElementById('vernal-il-why-wrap');
+                if (why && data.skip_reasons && Object.keys(data.skip_reasons).length) {
+                  var entries = Object.keys(data.skip_reasons).map(function (k) {
+                    return { code: k, count: data.skip_reasons[k] };
+                  }).sort(function (a, b) { return b.count - a.count; });
+                  var html = '<h3 style="margin:16px 0 6px;font-size:14px;">Why nothing (or little) linked</h3><ul style="list-style:disc;margin-left:18px;font-size:13px;">';
+                  entries.forEach(function (e) {
+                    var label = reasonLabels[e.code] || e.code;
+                    html += '<li>' + label + ' <strong>(' + e.count + ')</strong> <code style="opacity:.7;">' + e.code + '</code></li>';
+                  });
+                  html += '</ul>';
+                  why.innerHTML = html;
+                }
+                if (!data.in_progress && timer) {
+                  clearInterval(timer);
+                  timer = null;
+                  root.setAttribute('data-in-progress', '0');
+                }
+              }
+              function poll() {
+                var body = new FormData();
+                body.append('action', 'vernal_il_run_status');
+                body.append('nonce', nonce);
+                fetch(ajaxUrl, { method: 'POST', credentials: 'same-origin', body: body })
+                  .then(function (r) { return r.json(); })
+                  .then(function (json) {
+                    if (json && json.success) apply(json.data);
+                  })
+                  .catch(function () {});
+              }
+              if (root.getAttribute('data-in-progress') === '1' || <?php echo !empty($_GET['vernal_il_queued']) ? 'true' : 'false'; ?>) {
+                poll();
+                timer = setInterval(poll, 2000);
+              }
+            })();
+            </script>
 
             <?php $health_rows = $this->collect_link_health_rows(20); ?>
             <div style="background:#fff;border:1px solid #ccd0d4;padding:16px 20px;margin:20px 0;max-width:1100px;">
