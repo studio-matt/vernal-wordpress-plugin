@@ -84,8 +84,11 @@ class Vernal_Internal_Links {
         $out['excluded_category_ids'] = self::normalize_id_list(isset($out['excluded_category_ids']) ? $out['excluded_category_ids'] : array());
         $out['excluded_post_ids'] = self::normalize_id_list(isset($out['excluded_post_ids']) ? $out['excluded_post_ids'] : array());
         $out['pillar_post_ids'] = self::normalize_id_list(isset($out['pillar_post_ids']) ? $out['pillar_post_ids'] : array());
-        // v1 hard rule: at most one edge per source per pass
-        $out['max_new_outbound_links_per_source'] = 1;
+        // Catch-up / steady-state: how many outbound edges to attempt per source per run.
+        $out['max_new_outbound_links_per_source'] = max(
+            1,
+            min(15, (int) ($out['max_new_outbound_links_per_source'] ?? 1))
+        );
         return $out;
     }
 
@@ -919,7 +922,8 @@ class Vernal_Internal_Links {
     }
 
     /**
-     * Process outbound links for one source — at most one high-value edge.
+     * Process outbound links for one source — up to max_new_outbound_links_per_source
+     * high-value edges per run (reassess after each insert).
      */
     private function process_source_outbound($post, $settings, $run_id, $dest_id, $trigger) {
         $out = array(
@@ -958,8 +962,17 @@ class Vernal_Internal_Links {
             return $out;
         }
 
-        // v1: exactly one edge per pass when room exists
-        $room = 1;
+        $wanted = max(1, min(15, (int) ($settings['max_new_outbound_links_per_source'] ?? 1)));
+        $room = min(
+            $wanted,
+            max(0, $max_vernal - (int) $analysis['vernal']),
+            max(0, $max_total - (int) $analysis['total'])
+        );
+        if ($room < 1) {
+            $bump('already_at_link_cap');
+            $this->refresh_graph_stats_for_post($post->ID, false);
+            return $out;
+        }
 
         $ledger_strategy = 'best_missing_edge';
         if ($trigger === 'manual_run') {
@@ -975,42 +988,69 @@ class Vernal_Internal_Links {
             $ledger_strategy = 'new_post_outbound';
         }
 
-        $payload = $this->build_best_edge_payload($post, $settings, $dest_id, $analysis, $profile);
-        $resp = Vernal_Backend_API::request('plugin/internal-links/match', array(
-            'method' => 'POST',
-            'body'   => $payload,
-            'timeout'=> 60,
-        ));
-        if (is_wp_error($resp)) {
-            $out['errors']++;
-            $bump('machine_request_failed');
-            $out['note'] = 'machine_error: ' . $resp->get_error_message();
-            return $out;
-        }
-        $results = isset($resp['results']) && is_array($resp['results']) ? $resp['results'] : array();
-        if (!$results) {
-            $bump('no_machine_candidates');
-            $out['note'] = 'Machine returned no candidates (empty index, gates, or no related articles)';
-            $this->refresh_graph_stats_for_post($post->ID, false);
-            return $out;
-        }
         $content = $post->post_content;
         $ledger = $this->get_ledger($post->ID);
         $inserted_this_pass = 0;
         $used_anchors = $this->used_anchor_texts_from_ledger($ledger);
+        $skip_targets = array();
+        $mutated_targets = array();
+        $saw_empty_machine = false;
 
-        foreach ($results as $row) {
-            if ($inserted_this_pass >= $room) {
+        for ($attempt = 0; $attempt < $room; $attempt++) {
+            $analysis = Vernal_Internal_Link_Inserter::analyze_internal_links($content);
+            if ($analysis['vernal'] >= $max_vernal || $analysis['total'] >= $max_total) {
                 break;
             }
+            $analysis_for_match = $analysis;
+            $analysis_for_match['target_ids'] = array_values(
+                array_unique(
+                    array_merge(
+                        isset($analysis['target_ids']) && is_array($analysis['target_ids'])
+                            ? $analysis['target_ids']
+                            : array(),
+                        $skip_targets
+                    )
+                )
+            );
+
+            $payload = $this->build_best_edge_payload($post, $settings, $dest_id, $analysis_for_match, $profile);
+            $resp = Vernal_Backend_API::request('plugin/internal-links/match', array(
+                'method' => 'POST',
+                'body'   => $payload,
+                'timeout'=> 60,
+            ));
+            if (is_wp_error($resp)) {
+                $out['errors']++;
+                $bump('machine_request_failed');
+                $out['note'] = 'machine_error: ' . $resp->get_error_message();
+                break;
+            }
+            $results = isset($resp['results']) && is_array($resp['results']) ? $resp['results'] : array();
+            if (!$results) {
+                if ($inserted_this_pass === 0 && !$saw_empty_machine) {
+                    $bump('no_machine_candidates');
+                    $out['note'] = 'Machine returned no candidates (empty index, gates, or no related articles)';
+                    $saw_empty_machine = true;
+                }
+                break;
+            }
+
+            $row = $results[0];
             $score = isset($row['score']) ? (float) $row['score'] : 0;
             if ($score < (float) $settings['min_relevance_score']) {
                 $bump('below_min_relevance');
+                $tid = isset($row['target_wp_post_id']) ? (int) $row['target_wp_post_id'] : 0;
+                if ($tid > 0) {
+                    $skip_targets[] = $tid;
+                }
                 continue;
             }
             $target_id = isset($row['target_wp_post_id']) ? (int) $row['target_wp_post_id'] : 0;
             if (!$this->is_valid_target($target_id, $settings, $post->ID)) {
                 $bump('invalid_or_excluded_target');
+                if ($target_id > 0) {
+                    $skip_targets[] = $target_id;
+                }
                 continue;
             }
             $permalink = get_permalink($target_id);
@@ -1026,10 +1066,12 @@ class Vernal_Internal_Links {
             }
             if ($phrase === '') {
                 $bump('no_grounded_anchor');
+                $skip_targets[] = $target_id;
                 continue;
             }
             if ($this->is_generic_anchor($phrase) || in_array(strtolower($phrase), $used_anchors, true)) {
                 $bump('anchor_rejected');
+                $skip_targets[] = $target_id;
                 continue;
             }
             $mutation_id = Vernal_Internal_Link_Inserter::new_mutation_id();
@@ -1041,6 +1083,7 @@ class Vernal_Internal_Links {
             ));
             if (empty($ins['inserted'])) {
                 $bump('phrase_not_found_in_body');
+                $skip_targets[] = $target_id;
                 continue;
             }
             $content = $ins['content'];
@@ -1060,6 +1103,9 @@ class Vernal_Internal_Links {
             );
             $ledger[] = $entry;
             $this->push_recent_mutation($entry);
+            $used_anchors[] = strtolower($phrase);
+            $skip_targets[] = $target_id;
+            $mutated_targets[] = $target_id;
             $inserted_this_pass++;
             $out['linked']++;
             $out['note'] = '';
@@ -1068,8 +1114,8 @@ class Vernal_Internal_Links {
         if ($inserted_this_pass > 0) {
             $this->save_post_content($post->ID, $content, $ledger);
             $this->refresh_graph_stats_for_post($post->ID, true);
-            if (!empty($entry['target_wp_post_id'])) {
-                $this->bump_inbound_cache((int) $entry['target_wp_post_id']);
+            foreach (array_unique($mutated_targets) as $tid) {
+                $this->bump_inbound_cache((int) $tid);
             }
         } else {
             $this->refresh_graph_stats_for_post($post->ID, false);
@@ -1832,7 +1878,10 @@ class Vernal_Internal_Links {
         $out['enabled'] = !empty($input['enabled']) ? 1 : 0;
         $sched = isset($input['schedule']) ? sanitize_text_field($input['schedule']) : 'hourly';
         $out['schedule'] = in_array($sched, array('hourly', 'twicedaily', 'daily', 'weekly'), true) ? $sched : 'hourly';
-        $out['max_new_outbound_links_per_source'] = 1; // v1 hard rule
+        $out['max_new_outbound_links_per_source'] = max(
+            1,
+            min(15, (int) ($input['max_new_outbound_links_per_source'] ?? 1))
+        );
         $out['max_inbound_source_mutations_per_new_target'] = max(0, (int) ($input['max_inbound_source_mutations_per_new_target'] ?? 1));
         $out['batch_sources_per_tick'] = max(1, min(100, (int) ($input['batch_sources_per_tick'] ?? 25)));
         $out['min_relevance_score'] = max(0, min(1, (float) ($input['min_relevance_score'] ?? 0.35)));
@@ -2570,14 +2619,13 @@ class Vernal_Internal_Links {
                     <?php
                     ob_start();
                     ?>
-                    <input type="number" class="small-text" value="1" min="1" max="1" disabled="disabled" />
-                    <input type="hidden" name="vernal_il[max_new_outbound_links_per_source]" value="1" />
+                    <input type="number" class="small-text" name="vernal_il[max_new_outbound_links_per_source]" value="<?php echo (int) ($settings['max_new_outbound_links_per_source'] ?? 1); ?>" min="1" max="15" />
                     <?php
                     $this->render_settings_row(
                         __('New links added to each article (per run)', 'vernal-contentum'),
                         ob_get_clean(),
-                        __('Fixed at 1 so the topic graph can reassess after every insert. Soft targets (e.g. 8) are reached across many scheduled runs, not in one blast.', 'vernal-contentum'),
-                        __('Hourly schedule + one edge per pass is the intended pacing for quality.', 'vernal-contentum')
+                        __('How many outbound links to try inserting into each checked article during one run. Use 1 for steady hourly quality; raise to 5–10 for a strong backfill / catch-up, then lower again.', 'vernal-contentum'),
+                        __('Still limited by soft max / total link caps, relevance score, and finding a usable phrase in the body. Soft targets (e.g. 8–15) are the longer-term ceiling across runs.', 'vernal-contentum')
                     );
 
                     ob_start();
