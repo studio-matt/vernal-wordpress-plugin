@@ -362,9 +362,35 @@ class Vernal_Internal_Links {
             'skipped'      => 0,
             'errors'       => 0,
             'trigger'      => $trigger,
+            'skip_reasons' => array(),
+            'sample_notes' => array(),
+            'message'      => '',
         );
 
         $meaningful = false;
+        $bump_reason = function (&$summary, $code, $n = 1) {
+            $code = (string) $code;
+            if ($code === '') {
+                return;
+            }
+            if (!isset($summary['skip_reasons'][$code])) {
+                $summary['skip_reasons'][$code] = 0;
+            }
+            $summary['skip_reasons'][$code] += (int) $n;
+        };
+        $note = function (&$summary, $text) {
+            $text = trim((string) $text);
+            if ($text === '') {
+                return;
+            }
+            if (!isset($summary['sample_notes']) || !is_array($summary['sample_notes'])) {
+                $summary['sample_notes'] = array();
+            }
+            if (count($summary['sample_notes']) >= 12) {
+                return;
+            }
+            $summary['sample_notes'][] = $text;
+        };
 
         try {
             if (empty($settings['enabled']) && $trigger === 'cron') {
@@ -403,6 +429,10 @@ class Vernal_Internal_Links {
             $batch = (int) $settings['batch_sources_per_tick'];
             $sources = $this->select_source_posts($settings, $batch, isset($opts['focus_post_ids']) ? $opts['focus_post_ids'] : array());
             $meaningful = !empty($sources);
+            if (!$meaningful) {
+                $summary['message'] = 'No eligible articles to check this pass (all filtered, cooling down, or excluded).';
+                $bump_reason($summary, 'no_eligible_sources');
+            }
 
             foreach ($sources as $post) {
                 $summary['scanned']++;
@@ -415,8 +445,16 @@ class Vernal_Internal_Links {
                 }
                 if (!empty($result['errors'])) {
                     $summary['errors'] += (int) $result['errors'];
-                } else {
-                    // Stamp success for this source even if zero links (idempotent pass)
+                }
+                if (!empty($result['skip_reasons']) && is_array($result['skip_reasons'])) {
+                    foreach ($result['skip_reasons'] as $code => $count) {
+                        $bump_reason($summary, $code, (int) $count);
+                    }
+                }
+                if (!empty($result['note'])) {
+                    $note($summary, sprintf('#%d %s: %s', (int) $post->ID, get_the_title($post), $result['note']));
+                }
+                if (empty($result['errors'])) {
                     $this->stamp_source_pass($post->ID, !empty($result['linked']));
                 }
 
@@ -429,7 +467,24 @@ class Vernal_Internal_Links {
                     if (!empty($ib['errors'])) {
                         $summary['errors'] += (int) $ib['errors'];
                     }
+                    if (!empty($ib['skip_reasons']) && is_array($ib['skip_reasons'])) {
+                        foreach ($ib['skip_reasons'] as $code => $count) {
+                            $bump_reason($summary, $code, (int) $count);
+                        }
+                    }
                 }
+            }
+
+            if ($summary['linked'] === 0 && $summary['scanned'] > 0 && $summary['message'] === '') {
+                $top = '';
+                if (!empty($summary['skip_reasons'])) {
+                    arsort($summary['skip_reasons']);
+                    $keys = array_keys($summary['skip_reasons']);
+                    $top = (string) $keys[0];
+                }
+                $summary['message'] = $top !== ''
+                    ? sprintf('No links added. Top skip reason: %s (see Why below).', $top)
+                    : 'No links added this pass.';
             }
 
             $summary['status'] = ($summary['errors'] > 0 && $summary['linked'] === 0 && $summary['scanned'] === 0)
@@ -662,7 +717,24 @@ class Vernal_Internal_Links {
      * Process outbound links for one source — at most one high-value edge.
      */
     private function process_source_outbound($post, $settings, $run_id, $dest_id, $trigger) {
-        $out = array('linked' => 0, 'skipped' => 0, 'errors' => 0);
+        $out = array(
+            'linked'       => 0,
+            'skipped'      => 0,
+            'errors'       => 0,
+            'skip_reasons' => array(),
+            'note'         => '',
+        );
+        $bump = function ($code) use (&$out) {
+            $out['skipped']++;
+            if (!isset($out['skip_reasons'][$code])) {
+                $out['skip_reasons'][$code] = 0;
+            }
+            $out['skip_reasons'][$code]++;
+            if ($out['note'] === '') {
+                $out['note'] = $code;
+            }
+        };
+
         $analysis = Vernal_Internal_Link_Inserter::analyze_internal_links($post->post_content);
         $profile = $this->resolve_link_profile($post, $settings);
         $max_vernal = (int) $profile['soft_max'];
@@ -676,7 +748,7 @@ class Vernal_Internal_Links {
         }
 
         if ($analysis['vernal'] >= $max_vernal || $analysis['total'] >= $max_total) {
-            $out['skipped']++;
+            $bump('already_at_link_cap');
             $this->refresh_graph_stats_for_post($post->ID, false);
             return $out;
         }
@@ -706,9 +778,18 @@ class Vernal_Internal_Links {
         ));
         if (is_wp_error($resp)) {
             $out['errors']++;
+            $out['note'] = 'machine_error: ' . $resp->get_error_message();
+            $bump('machine_request_failed');
+            // bump already incremented skipped; for errors we still want the reason visible
             return $out;
         }
         $results = isset($resp['results']) && is_array($resp['results']) ? $resp['results'] : array();
+        if (!$results) {
+            $bump('no_machine_candidates');
+            $out['note'] = 'Machine returned no candidates (empty index, gates, or no related articles)';
+            $this->refresh_graph_stats_for_post($post->ID, false);
+            return $out;
+        }
         $content = $post->post_content;
         $ledger = $this->get_ledger($post->ID);
         $inserted_this_pass = 0;
@@ -720,23 +801,23 @@ class Vernal_Internal_Links {
             }
             $score = isset($row['score']) ? (float) $row['score'] : 0;
             if ($score < (float) $settings['min_relevance_score']) {
-                $out['skipped']++;
+                $bump('below_min_relevance');
                 continue;
             }
             $target_id = isset($row['target_wp_post_id']) ? (int) $row['target_wp_post_id'] : 0;
             if (!$this->is_valid_target($target_id, $settings, $post->ID)) {
-                $out['skipped']++;
+                $bump('invalid_or_excluded_target');
                 continue;
             }
             $permalink = get_permalink($target_id);
             $anchors = isset($row['anchors']) && is_array($row['anchors']) ? $row['anchors'] : array();
             if (!$anchors) {
-                $out['skipped']++;
+                $bump('no_grounded_anchor');
                 continue;
             }
             $phrase = isset($anchors[0]['text']) ? (string) $anchors[0]['text'] : '';
             if ($phrase === '' || $this->is_generic_anchor($phrase) || in_array(strtolower($phrase), $used_anchors, true)) {
-                $out['skipped']++;
+                $bump('anchor_rejected');
                 continue;
             }
             $mutation_id = Vernal_Internal_Link_Inserter::new_mutation_id();
@@ -747,7 +828,7 @@ class Vernal_Internal_Links {
                 'mutation_id'       => $mutation_id,
             ));
             if (empty($ins['inserted'])) {
-                $out['skipped']++;
+                $bump('phrase_not_found_in_body');
                 continue;
             }
             $content = $ins['content'];
@@ -769,6 +850,7 @@ class Vernal_Internal_Links {
             $this->push_recent_mutation($entry);
             $inserted_this_pass++;
             $out['linked']++;
+            $out['note'] = '';
         }
 
         if ($inserted_this_pass > 0) {
@@ -779,6 +861,10 @@ class Vernal_Internal_Links {
             }
         } else {
             $this->refresh_graph_stats_for_post($post->ID, false);
+            if ($out['note'] === '' && $out['skipped'] > 0) {
+                $keys = array_keys($out['skip_reasons']);
+                $out['note'] = $keys ? (string) $keys[0] : 'skipped';
+            }
         }
         return $out;
     }
@@ -1580,6 +1666,21 @@ class Vernal_Internal_Links {
         return isset($map[$status]) ? $map[$status] : (string) $status;
     }
 
+    private function humanize_skip_reason($code) {
+        $map = array(
+            'no_eligible_sources'       => __('No eligible articles this pass (cooldown, exclusions, or filters)', 'vernal-contentum'),
+            'already_at_link_cap'       => __('Article already at max links', 'vernal-contentum'),
+            'machine_request_failed'    => __('Could not reach Vernal match API', 'vernal-contentum'),
+            'no_machine_candidates'     => __('Vernal found no related article (often empty RAG index or gates)', 'vernal-contentum'),
+            'below_min_relevance'       => __('Best match scored below minimum relatedness', 'vernal-contentum'),
+            'invalid_or_excluded_target'=> __('Suggested target was invalid or excluded', 'vernal-contentum'),
+            'no_grounded_anchor'        => __('No usable link phrase in the article body', 'vernal-contentum'),
+            'anchor_rejected'           => __('Link phrase was generic or already used', 'vernal-contentum'),
+            'phrase_not_found_in_body'  => __('Suggested phrase was not found in the article text', 'vernal-contentum'),
+        );
+        return isset($map[$code]) ? $map[$code] : (string) $code;
+    }
+
     /**
      * Category multi-select chips (add from dropdown; remove via X).
      *
@@ -1829,8 +1930,8 @@ class Vernal_Internal_Links {
                         <strong><?php esc_html_e('Result:', 'vernal-contentum'); ?></strong>
                         <?php echo esc_html($this->humanize_run_status((string) ($last['status'] ?? ''))); ?>
                     </p>
-                    <?php if (!empty($last['message']) && (($last['status'] ?? '') === 'error' || (int) ($last['errors'] ?? 0) > 0)) : ?>
-                        <p class="notice notice-error inline" style="margin:8px 0;padding:8px 12px;">
+                    <?php if (!empty($last['message'])) : ?>
+                        <p class="notice <?php echo (($last['status'] ?? '') === 'error' || (int) ($last['errors'] ?? 0) > 0) ? 'notice-error' : 'notice-warning'; ?> inline" style="margin:8px 0;padding:8px 12px;">
                             <?php echo esc_html((string) $last['message']); ?>
                         </p>
                     <?php endif; ?>
@@ -1840,6 +1941,35 @@ class Vernal_Internal_Links {
                         <li><?php echo esc_html(sprintf(__('Skipped (no good match or already linked): %d', 'vernal-contentum'), (int) ($last['skipped'] ?? 0))); ?></li>
                         <li><?php echo esc_html(sprintf(__('Errors: %d', 'vernal-contentum'), (int) ($last['errors'] ?? 0))); ?></li>
                     </ul>
+                    <?php
+                    $reasons = isset($last['skip_reasons']) && is_array($last['skip_reasons']) ? $last['skip_reasons'] : array();
+                    if ($reasons) :
+                        arsort($reasons);
+                        ?>
+                        <h3 style="margin:16px 0 6px;font-size:14px;"><?php esc_html_e('Why nothing (or little) linked', 'vernal-contentum'); ?></h3>
+                        <ul style="list-style:disc;margin-left:18px;font-size:13px;">
+                            <?php foreach ($reasons as $code => $count) : ?>
+                                <li>
+                                    <?php echo esc_html($this->humanize_skip_reason((string) $code)); ?>
+                                    <strong>(<?php echo (int) $count; ?>)</strong>
+                                    <code style="opacity:.7;"><?php echo esc_html((string) $code); ?></code>
+                                </li>
+                            <?php endforeach; ?>
+                        </ul>
+                    <?php endif; ?>
+                    <?php
+                    $samples = isset($last['sample_notes']) && is_array($last['sample_notes']) ? $last['sample_notes'] : array();
+                    if ($samples) :
+                        ?>
+                        <details style="margin-top:10px;">
+                            <summary style="cursor:pointer;font-size:13px;"><?php esc_html_e('Sample articles from this run', 'vernal-contentum'); ?></summary>
+                            <ul style="list-style:disc;margin:8px 0 0 18px;font-size:12px;">
+                                <?php foreach ($samples as $line) : ?>
+                                    <li><?php echo esc_html((string) $line); ?></li>
+                                <?php endforeach; ?>
+                            </ul>
+                        </details>
+                    <?php endif; ?>
                     <p class="description">
                         <?php echo esc_html($last['completed_at'] ?? $last['started_at'] ?? ''); ?>
                         <?php if (!empty($last['run_id'])) : ?>
