@@ -404,12 +404,17 @@ class Vernal_Internal_Links {
         } elseif ($status === 'completed' || $status === 'error') {
             $pct = 100;
         }
+        $message = (string) ($last['message'] ?? '');
+        // Never show the live "in progress…" banner after the run has finished.
+        if (!$in_progress && $this->is_in_progress_message($message)) {
+            $message = '';
+        }
         return array(
             'in_progress'     => $in_progress,
             'lock_active'     => $lock_active,
             'status'          => $status,
             'status_label'    => $this->humanize_run_status($status),
-            'message'         => (string) ($last['message'] ?? ''),
+            'message'         => $message,
             'scanned'         => (int) ($last['scanned'] ?? 0),
             'linked'          => (int) ($last['linked'] ?? 0),
             'skipped'         => (int) ($last['skipped'] ?? 0),
@@ -679,6 +684,10 @@ class Vernal_Internal_Links {
                 }
             }
 
+            // Drop the transient "in progress…" copy before we mark completed.
+            if ($this->is_in_progress_message((string) ($summary['message'] ?? ''))) {
+                $summary['message'] = '';
+            }
             if ($summary['linked'] === 0 && $summary['scanned'] > 0 && $summary['message'] === '') {
                 $top = '';
                 if (!empty($summary['skip_reasons'])) {
@@ -694,19 +703,34 @@ class Vernal_Internal_Links {
             $summary['status'] = ($summary['errors'] > 0 && $summary['linked'] === 0 && $summary['scanned'] === 0)
                 ? 'error'
                 : 'completed';
+            $summary['progress_label'] = '';
             $this->finish_run($summary, $meaningful && $summary['status'] === 'completed');
         } catch (Exception $e) {
             $summary['status'] = 'error';
             $summary['errors']++;
             $summary['message'] = $e->getMessage();
+            $summary['progress_label'] = '';
             $this->finish_run($summary, false);
         }
 
         return $summary;
     }
 
+    private function is_in_progress_message($message) {
+        $message = trim((string) $message);
+        if ($message === '') {
+            return false;
+        }
+        $needle = __('Linking run in progress…', 'vernal-contentum');
+        return $message === $needle || stripos($message, 'Linking run in progress') !== false;
+    }
+
     private function finish_run(&$summary, $advance_watermark) {
         $summary['completed_at'] = gmdate('c');
+        if (in_array(($summary['status'] ?? ''), array('completed', 'error'), true)
+            && $this->is_in_progress_message((string) ($summary['message'] ?? ''))) {
+            $summary['message'] = '';
+        }
         $this->release_lock(isset($summary['run_id']) ? $summary['run_id'] : null);
         update_option(self::OPTION_LAST_RUN, $summary, false);
         if ($advance_watermark) {
@@ -1836,10 +1860,16 @@ class Vernal_Internal_Links {
             wp_unschedule_event($ts, self::CRON_MANUAL);
         }
         $last = get_option(self::OPTION_LAST_RUN, array());
-        if (is_array($last) && in_array(($last['status'] ?? ''), array('queued', 'running', 'skipped_locked'), true)) {
-            $last['status'] = 'error';
-            $last['message'] = __('Stuck run cleared by admin. You can start a new run.', 'vernal-contentum');
-            $last['completed_at'] = gmdate('c');
+        if (is_array($last)) {
+            $status = (string) ($last['status'] ?? '');
+            if (in_array($status, array('queued', 'running', 'skipped_locked'), true)) {
+                $last['status'] = 'error';
+                $last['message'] = __('Stuck run cleared by admin. You can start a new run.', 'vernal-contentum');
+                $last['completed_at'] = gmdate('c');
+            } elseif ($this->is_in_progress_message((string) ($last['message'] ?? ''))) {
+                // Finished runs used to leave the transient banner forever.
+                $last['message'] = '';
+            }
             $last['progress_label'] = '';
             update_option(self::OPTION_LAST_RUN, $last, false);
         }
