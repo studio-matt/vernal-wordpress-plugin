@@ -921,6 +921,18 @@ class Vernal_API {
                 $updated_keys[] = 'meta:' . $meta_key;
             }
         }
+        // Surgical renumber / cover refresh — sideload without touching ACF guest fields.
+        if (!empty($params['featured_image_url'])) {
+            $image_url = esc_url_raw($params['featured_image_url']);
+            if (!empty($image_url)) {
+                $thumbnail_attachment_id = $this->sideload_image_attachment($post_id, $image_url);
+                if ($thumbnail_attachment_id) {
+                    set_post_thumbnail($post_id, $thumbnail_attachment_id);
+                    $this->set_acf_or_meta($post_id, 'thumbnail', $thumbnail_attachment_id);
+                    $updated_keys[] = 'featured_image';
+                }
+            }
+        }
         $verified = array();
         if (!empty($params['acf']) && is_array($params['acf'])) {
             $this->apply_acf_fields($post_id, $params['acf'], 0);
