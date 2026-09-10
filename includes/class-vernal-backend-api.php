@@ -102,32 +102,58 @@ class Vernal_Backend_API {
             $args['body'] = json_encode($args['body']);
         }
         
-        // Make the request
-        $response = wp_remote_request($url, $args);
-        
-        // Handle errors
-        if (is_wp_error($response)) {
-            return $response;
+        $max_attempts = 1;
+        if (!empty($args['retries'])) {
+            $max_attempts = 1 + max(0, min(3, (int) $args['retries']));
         }
-        
-        $status_code = wp_remote_retrieve_response_code($response);
-        $body = wp_remote_retrieve_body($response);
-        $data = json_decode($body, true);
-        
-        // Check for HTTP errors
-        if ($status_code >= 400) {
-            $error_message = isset($data['detail']) ? $data['detail'] : __('Backend API request failed', 'vernal-contentum');
-            return new WP_Error(
-                'api_error',
-                $error_message,
-                array(
-                    'status_code' => $status_code,
-                    'response' => $data
-                )
-            );
+        unset($args['retries']);
+
+        $last_error = null;
+        for ($attempt = 1; $attempt <= $max_attempts; $attempt++) {
+            $response = wp_remote_request($url, $args);
+
+            if (is_wp_error($response)) {
+                $last_error = $response;
+                $transient = (bool) preg_match('/timeout|timed out|curl error 28/i', $response->get_error_message());
+                if ($transient && $attempt < $max_attempts) {
+                    usleep(250000 * $attempt);
+                    continue;
+                }
+                return $response;
+            }
+
+            $status_code = wp_remote_retrieve_response_code($response);
+            $body = wp_remote_retrieve_body($response);
+            $data = json_decode($body, true);
+
+            if (in_array((int) $status_code, array(502, 503, 504), true) && $attempt < $max_attempts) {
+                $last_error = new WP_Error(
+                    'api_error',
+                    isset($data['detail']) ? $data['detail'] : __('Backend API request failed', 'vernal-contentum'),
+                    array('status_code' => $status_code, 'response' => $data)
+                );
+                usleep(250000 * $attempt);
+                continue;
+            }
+
+            if ($status_code >= 400) {
+                $error_message = isset($data['detail']) ? $data['detail'] : __('Backend API request failed', 'vernal-contentum');
+                return new WP_Error(
+                    'api_error',
+                    $error_message,
+                    array(
+                        'status_code' => $status_code,
+                        'response' => $data
+                    )
+                );
+            }
+
+            return $data;
         }
-        
-        return $data;
+
+        return $last_error instanceof WP_Error
+            ? $last_error
+            : new WP_Error('api_error', __('Backend API request failed', 'vernal-contentum'));
     }
     
     /**

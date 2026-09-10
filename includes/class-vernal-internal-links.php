@@ -413,7 +413,16 @@ class Vernal_Internal_Links {
             'in_progress'     => $in_progress,
             'lock_active'     => $lock_active,
             'status'          => $status,
-            'status_label'    => $this->humanize_run_status($status),
+            'status_label'    => $this->humanize_run_status($status, (int) ($last['linked'] ?? 0)),
+            'articles_checked'=> (int) ($last['articles_checked'] ?? $last['scanned'] ?? 0),
+            'semantic_targets_found' => (int) ($last['semantic_targets_found'] ?? 0),
+            'semantic_targets_rejected' => (int) ($last['semantic_targets_rejected'] ?? 0),
+            'grounding_attempted' => (int) ($last['grounding_attempted'] ?? 0),
+            'grounded_targets'=> (int) ($last['grounded_targets'] ?? 0),
+            'links_inserted'  => (int) ($last['links_inserted'] ?? $last['linked'] ?? 0),
+            'insert_failed'   => (int) ($last['insert_failed'] ?? 0),
+            'machine_request_failed' => (int) ($last['machine_request_failed'] ?? 0),
+            'duplicate_or_existing_edge' => (int) ($last['duplicate_or_existing_edge'] ?? 0),
             'message'         => $message,
             'scanned'         => (int) ($last['scanned'] ?? 0),
             'linked'          => (int) ($last['linked'] ?? 0),
@@ -552,6 +561,15 @@ class Vernal_Internal_Links {
             'progress_total'  => 0,
             'progress_current'=> 0,
             'progress_label'  => __('Preparing articles…', 'vernal-contentum'),
+            'articles_checked'=> 0,
+            'semantic_targets_found' => 0,
+            'semantic_targets_rejected' => 0,
+            'grounding_attempted' => 0,
+            'grounded_targets'=> 0,
+            'links_inserted'  => 0,
+            'insert_failed'   => 0,
+            'machine_request_failed' => 0,
+            'duplicate_or_existing_edge' => 0,
         );
         $this->persist_run_progress($summary);
 
@@ -646,14 +664,29 @@ class Vernal_Internal_Links {
                 $this->persist_run_progress($summary);
 
                 $result = $this->process_source_outbound($post, $settings, $run_id, $dest_id, $trigger);
+                $summary['articles_checked'] = (int) $summary['scanned'];
                 if (!empty($result['linked'])) {
                     $summary['linked'] += (int) $result['linked'];
+                    $summary['links_inserted'] += (int) $result['linked'];
                 }
                 if (!empty($result['skipped'])) {
                     $summary['skipped'] += (int) $result['skipped'];
                 }
                 if (!empty($result['errors'])) {
                     $summary['errors'] += (int) $result['errors'];
+                }
+                foreach (array(
+                    'semantic_targets_found',
+                    'semantic_targets_rejected',
+                    'grounding_attempted',
+                    'grounded_targets',
+                    'insert_failed',
+                    'machine_request_failed',
+                    'duplicate_or_existing_edge',
+                ) as $stage_key) {
+                    if (!empty($result[$stage_key])) {
+                        $summary[$stage_key] = (int) ($summary[$stage_key] ?? 0) + (int) $result[$stage_key];
+                    }
                 }
                 if (!empty($result['skip_reasons']) && is_array($result['skip_reasons'])) {
                     foreach ($result['skip_reasons'] as $code => $count) {
@@ -956,6 +989,13 @@ class Vernal_Internal_Links {
             'errors'       => 0,
             'skip_reasons' => array(),
             'note'         => '',
+            'semantic_targets_found' => 0,
+            'semantic_targets_rejected' => 0,
+            'grounding_attempted' => 0,
+            'grounded_targets' => 0,
+            'insert_failed' => 0,
+            'machine_request_failed' => 0,
+            'duplicate_or_existing_edge' => 0,
         );
         $bump = function ($code) use (&$out) {
             $out['skipped']++;
@@ -982,6 +1022,7 @@ class Vernal_Internal_Links {
 
         if ($analysis['vernal'] >= $max_vernal || $analysis['total'] >= $max_total) {
             $bump('already_at_link_cap');
+            $out['duplicate_or_existing_edge']++;
             $this->refresh_graph_stats_for_post($post->ID, false);
             return $out;
         }
@@ -1039,18 +1080,22 @@ class Vernal_Internal_Links {
 
             $payload = $this->build_best_edge_payload($post, $settings, $dest_id, $analysis_for_match, $profile);
             $resp = Vernal_Backend_API::request('plugin/internal-links/match', array(
-                'method' => 'POST',
-                'body'   => $payload,
-                'timeout'=> 60,
+                'method'  => 'POST',
+                'body'    => $payload,
+                'timeout' => 60,
+                'retries' => 2,
             ));
             if (is_wp_error($resp)) {
                 $out['errors']++;
+                $out['machine_request_failed']++;
                 $bump('machine_request_failed');
                 $out['note'] = 'machine_error: ' . $resp->get_error_message();
+                // Do not abort the whole job counters — stop further attempts for this source.
                 break;
             }
             $results = isset($resp['results']) && is_array($resp['results']) ? $resp['results'] : array();
             if (!$results) {
+                $out['semantic_targets_rejected']++;
                 if ($inserted_this_pass === 0 && !$saw_empty_machine) {
                     $bump('no_machine_candidates');
                     $out['note'] = 'Machine returned no candidates (empty index, gates, or no related articles)';
@@ -1060,8 +1105,10 @@ class Vernal_Internal_Links {
             }
 
             $row = $results[0];
+            $out['semantic_targets_found']++;
             $score = isset($row['score']) ? (float) $row['score'] : 0;
             if ($score < (float) $settings['min_relevance_score']) {
+                $out['semantic_targets_rejected']++;
                 $bump('below_min_relevance');
                 $tid = isset($row['target_wp_post_id']) ? (int) $row['target_wp_post_id'] : 0;
                 if ($tid > 0) {
@@ -1071,6 +1118,7 @@ class Vernal_Internal_Links {
             }
             $target_id = isset($row['target_wp_post_id']) ? (int) $row['target_wp_post_id'] : 0;
             if (!$this->is_valid_target($target_id, $settings, $post->ID)) {
+                $out['semantic_targets_rejected']++;
                 $bump('invalid_or_excluded_target');
                 if ($target_id > 0) {
                     $skip_targets[] = $target_id;
@@ -1078,11 +1126,13 @@ class Vernal_Internal_Links {
                 continue;
             }
             $permalink = get_permalink($target_id);
+            $out['grounding_attempted']++;
             $anchors = isset($row['anchors']) && is_array($row['anchors']) ? $row['anchors'] : array();
             $phrase = '';
             if ($anchors && !empty($anchors[0]['text'])) {
                 $phrase = (string) $anchors[0]['text'];
             } else {
+                // Last-resort title local-ground only; Machine resolver owns primary grounding.
                 $target_post = get_post($target_id);
                 if ($target_post) {
                     $phrase = $this->local_ground_phrase($content, $target_post);
@@ -1093,6 +1143,7 @@ class Vernal_Internal_Links {
                 $skip_targets[] = $target_id;
                 continue;
             }
+            $out['grounded_targets']++;
             if ($this->is_generic_anchor($phrase) || in_array(strtolower($phrase), $used_anchors, true)) {
                 $bump('anchor_rejected');
                 $skip_targets[] = $target_id;
@@ -1106,6 +1157,7 @@ class Vernal_Internal_Links {
                 'mutation_id'       => $mutation_id,
             ));
             if (empty($ins['inserted'])) {
+                $out['insert_failed']++;
                 $bump('phrase_not_found_in_body');
                 $skip_targets[] = $target_id;
                 continue;
@@ -1352,8 +1404,50 @@ class Vernal_Internal_Links {
         );
     }
 
+
+    /**
+     * Yoast / Rank Math focus keyphrases for Machine grounding (Tier 1).
+     *
+     * @param WP_Post $post
+     * @return array{0:string,1:string[]} primary, secondary
+     */
+    private function post_seo_keyphrases($post) {
+        $primary = '';
+        $secondary = array();
+        $yoast = get_post_meta($post->ID, '_yoast_wpseo_focuskw', true);
+        if (is_string($yoast) && trim($yoast) !== '') {
+            $primary = trim($yoast);
+        }
+        if ($primary === '') {
+            $rm = get_post_meta($post->ID, 'rank_math_focus_keyword', true);
+            if (is_string($rm) && trim($rm) !== '') {
+                // Rank Math may store comma-separated keywords
+                $parts = array_values(array_filter(array_map('trim', explode(',', $rm))));
+                if ($parts) {
+                    $primary = $parts[0];
+                    $secondary = array_slice($parts, 1, 8);
+                }
+            }
+        }
+        $yoast_syn = get_post_meta($post->ID, '_yoast_wpseo_keywordsynonyms', true);
+        if (is_string($yoast_syn) && $yoast_syn !== '') {
+            $decoded = json_decode($yoast_syn, true);
+            if (is_array($decoded)) {
+                foreach ($decoded as $syn) {
+                    $syn = is_string($syn) ? trim($syn) : '';
+                    if ($syn !== '' && strcasecmp($syn, $primary) !== 0) {
+                        $secondary[] = $syn;
+                    }
+                }
+            }
+        }
+        $secondary = array_values(array_unique(array_filter($secondary)));
+        return array($primary, array_slice($secondary, 0, 12));
+    }
+
     private function post_to_match_source($post) {
         $cats = wp_get_post_categories($post->ID);
+        list($primary_kp, $secondary_kp) = $this->post_seo_keyphrases($post);
         return array(
             'wp_post_id'            => (int) $post->ID,
             'title'                 => get_the_title($post),
@@ -1361,8 +1455,8 @@ class Vernal_Internal_Links {
             'content_text'          => wp_strip_all_tags($post->post_content),
             'category_ids'          => array_map('intval', $cats),
             'permalink'             => get_permalink($post),
-            'primary_keyphrase'     => '',
-            'secondary_keyphrases'  => array(),
+            'primary_keyphrase'     => $primary_kp,
+            'secondary_keyphrases'  => $secondary_kp,
             'published_at'          => $post->post_date_gmt,
             'word_count'            => str_word_count(wp_strip_all_tags($post->post_content)),
         );
@@ -1389,6 +1483,7 @@ class Vernal_Internal_Links {
             if (!$this->is_post_eligible($p, $settings)) {
                 continue;
             }
+            list($stub_pk, $stub_sk) = $this->post_seo_keyphrases($p);
             $stubs[] = array(
                 'wp_post_id'           => (int) $p->ID,
                 'title'                => get_the_title($p),
@@ -1396,8 +1491,8 @@ class Vernal_Internal_Links {
                 'content_text'         => wp_strip_all_tags(wp_trim_words($p->post_content, 80)),
                 'category_ids'         => array_map('intval', wp_get_post_categories($p->ID)),
                 'permalink'            => get_permalink($p),
-                'primary_keyphrase'    => '',
-                'secondary_keyphrases' => array(),
+                'primary_keyphrase'    => $stub_pk,
+                'secondary_keyphrases' => $stub_sk,
                 'published_at'         => $p->post_date_gmt,
             );
         }
@@ -2002,9 +2097,12 @@ class Vernal_Internal_Links {
      * @param string $status
      * @return string
      */
-    private function humanize_run_status($status) {
+    private function humanize_run_status($status, $linked = 0) {
+        if ($status === 'completed' && (int) $linked === 0) {
+            return __('Run completed — 0 links inserted', 'vernal-contentum');
+        }
         $map = array(
-            'completed'     => __('Finished successfully', 'vernal-contentum'),
+            'completed'     => __('Run completed', 'vernal-contentum'),
             'running'       => __('Running in the background…', 'vernal-contentum'),
             'queued'        => __('Queued — starting shortly…', 'vernal-contentum'),
             'error'         => __('Stopped with errors', 'vernal-contentum'),
@@ -2309,9 +2407,11 @@ class Vernal_Internal_Links {
                 </p>
                 <ul style="list-style:disc;margin-left:18px;font-size:14px;" id="vernal-il-counts">
                     <li><?php esc_html_e('Articles checked:', 'vernal-contentum'); ?> <strong id="vernal-il-scanned"><?php echo (int) $status_payload['scanned']; ?></strong></li>
-                    <li><?php esc_html_e('Links added:', 'vernal-contentum'); ?> <strong id="vernal-il-linked"><?php echo (int) $status_payload['linked']; ?></strong></li>
+                    <li><?php esc_html_e('Related targets found:', 'vernal-contentum'); ?> <strong id="vernal-il-semantic-found"><?php echo (int) ($status_payload['semantic_targets_found'] ?? 0); ?></strong></li>
+                    <li><?php esc_html_e('Groundable targets:', 'vernal-contentum'); ?> <strong id="vernal-il-grounded"><?php echo (int) ($status_payload['grounded_targets'] ?? 0); ?></strong></li>
+                    <li><?php esc_html_e('Links inserted:', 'vernal-contentum'); ?> <strong id="vernal-il-linked"><?php echo (int) $status_payload['linked']; ?></strong></li>
                     <li><?php esc_html_e('Skipped:', 'vernal-contentum'); ?> <strong id="vernal-il-skipped"><?php echo (int) $status_payload['skipped']; ?></strong></li>
-                    <li><?php esc_html_e('Errors:', 'vernal-contentum'); ?> <strong id="vernal-il-errors"><?php echo (int) $status_payload['errors']; ?></strong></li>
+                    <li><?php esc_html_e('Machine errors:', 'vernal-contentum'); ?> <strong id="vernal-il-errors"><?php echo (int) ($status_payload['machine_request_failed'] ?? $status_payload['errors']); ?></strong></li>
                 </ul>
                 <div id="vernal-il-why-wrap">
                     <?php
@@ -2417,8 +2517,10 @@ class Vernal_Internal_Links {
                 setText('vernal-il-progress-status', data.status_label || data.status || '');
                 setText('vernal-il-progress-label', data.progress_label || '');
                 setText('vernal-il-result-text', data.status_label || data.status || '');
-                setText('vernal-il-scanned', data.scanned || 0);
-                setText('vernal-il-linked', data.linked || 0);
+                setText('vernal-il-scanned', data.scanned || data.articles_checked || 0);
+                setText('vernal-il-semantic-found', data.semantic_targets_found || 0);
+                setText('vernal-il-grounded', data.grounded_targets || 0);
+                setText('vernal-il-linked', data.linked || data.links_inserted || 0);
                 setText('vernal-il-skipped', data.skipped || 0);
                 setText('vernal-il-errors', data.errors || 0);
                 var msg = document.getElementById('vernal-il-message');
