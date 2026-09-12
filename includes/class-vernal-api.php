@@ -186,6 +186,21 @@ class Vernal_API {
             ),
         ));
 
+        // Purge page caches (Airlift / Elementor / Rocket / LiteSpeed / etc.) for a post URL
+        register_rest_route($namespace, '/posts/(?P<id>\d+)/purge-caches', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'purge_post_caches'),
+            'permission_callback' => array($this, 'check_api_key'),
+            'args' => array(
+                'id' => array(
+                    'required' => true,
+                    'validate_callback' => function ($param) {
+                        return is_numeric($param);
+                    },
+                ),
+            ),
+        ));
+
         // Enqueue internal linking for a published article (convenience; cron remains authoritative)
         register_rest_route($namespace, '/posts/(?P<id>\d+)/internal-links/enqueue', array(
             'methods' => 'POST',
@@ -975,6 +990,9 @@ class Vernal_API {
             }
         }
 
+        // ACF/meta updates alone often do not invalidate Airlift/page caches.
+        $cache_purge = $this->purge_page_caches_for_post($post_id);
+
         return rest_ensure_response(array(
             'success' => true,
             'data' => array(
@@ -987,8 +1005,199 @@ class Vernal_API {
                 'slug' => get_post_field('post_name', $post_id),
                 'plugin_version' => defined('VERNAL_CONTENTUM_VERSION') ? VERNAL_CONTENTUM_VERSION : null,
                 'gallery_debug' => $this->debug_partner_gallery($post_id),
+                'cache_purge' => $cache_purge,
             ),
         ));
+    }
+
+    /**
+     * REST: purge page caches for a post (Airlift, Elementor, Rocket, LiteSpeed, …).
+     */
+    public function purge_post_caches($request) {
+        $post_id = intval($request['id']);
+        $post = get_post($post_id);
+        if (!$post) {
+            return new WP_Error(
+                'not_found',
+                __('Post not found', 'vernal-contentum'),
+                array('status' => 404)
+            );
+        }
+        $cache_purge = $this->purge_page_caches_for_post($post_id);
+        return rest_ensure_response(array(
+            'success' => true,
+            'data' => array(
+                'id' => $post_id,
+                'url' => get_permalink($post_id),
+                'cache_purge' => $cache_purge,
+                'plugin_version' => defined('VERNAL_CONTENTUM_VERSION') ? VERNAL_CONTENTUM_VERSION : null,
+            ),
+        ));
+    }
+
+    /**
+     * Best-effort purge of page / CDN caches after show-notes or YT ACF updates.
+     * Airlift freezes rendered HTML; without a purge, Watch on YouTube stays stale.
+     *
+     * @param int $post_id
+     * @return array{url:string,actions:string[],classes_probed:string[]}
+     */
+    private function purge_page_caches_for_post($post_id) {
+        $post_id = intval($post_id);
+        $url = get_permalink($post_id);
+        $actions = array();
+        $classes_probed = array();
+
+        clean_post_cache($post_id);
+        $actions[] = 'clean_post_cache';
+
+        if (function_exists('wp_cache_post_change')) {
+            wp_cache_post_change($post_id);
+            $actions[] = 'wp_cache_post_change';
+        }
+
+        // Elementor CSS / file cache
+        if (class_exists('\Elementor\Plugin')) {
+            try {
+                $plugin = \Elementor\Plugin::$instance;
+                if ($plugin && isset($plugin->files_manager) && method_exists($plugin->files_manager, 'clear_cache')) {
+                    $plugin->files_manager->clear_cache();
+                    $actions[] = 'elementor_files_manager_clear_cache';
+                }
+            } catch (Exception $e) {
+                $actions[] = 'elementor_clear_cache_error';
+            }
+        }
+
+        // WP Rocket
+        if (function_exists('rocket_clean_post')) {
+            rocket_clean_post($post_id);
+            $actions[] = 'rocket_clean_post';
+        }
+        if (function_exists('rocket_clean_files') && $url) {
+            rocket_clean_files($url);
+            $actions[] = 'rocket_clean_files';
+        }
+
+        // LiteSpeed
+        do_action('litespeed_purge_post', $post_id);
+        $actions[] = 'litespeed_purge_post';
+        if ($url) {
+            do_action('litespeed_purge_url', $url);
+            $actions[] = 'litespeed_purge_url';
+        }
+
+        // WP Engine
+        if (class_exists('WpeCommon')) {
+            if (method_exists('WpeCommon', 'purge_varnish_cache')) {
+                WpeCommon::purge_varnish_cache($post_id);
+                $actions[] = 'wpe_purge_varnish_cache';
+            }
+            if (method_exists('WpeCommon', 'purge_memcached')) {
+                WpeCommon::purge_memcached();
+                $actions[] = 'wpe_purge_memcached';
+            }
+        }
+
+        // Generic / host helpers
+        if (function_exists('wp_cache_clear_cache')) {
+            wp_cache_clear_cache();
+            $actions[] = 'wp_cache_clear_cache';
+        }
+        if (function_exists('sg_cachepress_purge_cache')) {
+            sg_cachepress_purge_cache();
+            $actions[] = 'sg_cachepress_purge_cache';
+        }
+        if (has_action('cache_enabler_clear_page_cache_by_post_id')) {
+            do_action('cache_enabler_clear_page_cache_by_post_id', $post_id);
+            $actions[] = 'cache_enabler_clear_page_cache_by_post_id';
+        }
+
+        // Airlift / BlogVault — no public docs; fire known hooks + a few class methods.
+        $hook_names = array(
+            'al_purge_cache',
+            'airlift_purge_cache',
+            'airlift_clear_cache',
+            'bv_purge_cache',
+            'bv_clear_cache',
+            'blogvault_clear_cache',
+            'al_clear_page_cache',
+        );
+        foreach ($hook_names as $hook) {
+            if (has_action($hook)) {
+                do_action($hook, $post_id);
+                do_action($hook, $url);
+                do_action($hook);
+                $actions[] = 'action:' . $hook;
+            } else {
+                // Still fire — some plugins register late / use add_action inside the hook name check incorrectly.
+                do_action($hook, $post_id);
+                do_action($hook, $url);
+            }
+        }
+
+        $named = array(
+            array('ALCache', 'purgeAll'),
+            array('ALCache', 'purge'),
+            array('ALCache', 'clearCache'),
+            array('ALCache', 'purgeUrl'),
+            array('ALCache', 'purge_url'),
+            array('ALWPCache', 'purge'),
+            array('ALWPCache', 'purgeAll'),
+            array('AirliftCache', 'purge'),
+            array('AirliftCache', 'purge_all'),
+            array('BVCache', 'purge'),
+            array('BVCache', 'clear'),
+        );
+        foreach ($named as $pair) {
+            list($class, $method) = $pair;
+            if (!class_exists($class)) {
+                continue;
+            }
+            $classes_probed[] = $class;
+            if (!method_exists($class, $method)) {
+                continue;
+            }
+            try {
+                $ref = new ReflectionMethod($class, $method);
+                if (!$ref->isPublic() || $ref->isAbstract()) {
+                    continue;
+                }
+                if ($ref->isStatic()) {
+                    $argc = $ref->getNumberOfRequiredParameters();
+                    if ($argc === 0) {
+                        $ref->invoke(null);
+                    } elseif ($argc === 1) {
+                        $ref->invoke(null, $url ? $url : $post_id);
+                    } else {
+                        continue;
+                    }
+                    $actions[] = $class . '::' . $method;
+                }
+            } catch (Throwable $e) {
+                $actions[] = $class . '::' . $method . ':error';
+            }
+        }
+
+        // Record which AL*/BV* classes are loaded (helps diagnose Airlift purge gaps).
+        foreach (get_declared_classes() as $class) {
+            if (preg_match('/^(AL|Airlift|BV|BlogVault)/i', $class)) {
+                $classes_probed[] = $class;
+            }
+        }
+
+        // Bump modified time so Last-Modified / LM-based layers move.
+        wp_update_post(array(
+            'ID' => $post_id,
+            'post_title' => get_post_field('post_title', $post_id),
+        ));
+        $actions[] = 'wp_update_post_touch';
+
+        return array(
+            'url' => $url,
+            'actions' => array_values(array_unique($actions)),
+            'classes_probed' => array_values(array_unique($classes_probed)),
+        );
     }
 
     /**
@@ -1555,10 +1764,14 @@ class Vernal_API {
                 $html = class_exists('Vernal_Show_Notes_Fields')
                     ? Vernal_Show_Notes_Fields::guest_links_to_html($rows)
                     : '';
-                if ($html !== '') {
-                    $this->set_acf_or_meta($post_id, 'ih_guest_links_html', $html);
-                }
+                // Always write HTML (including empty) so clears remove stale guest-link markup.
+                $this->set_acf_or_meta($post_id, 'ih_guest_links_html', $html);
+                update_post_meta($post_id, 'ih_guest_links_html', $html);
                 $this->set_acf_or_meta($post_id, 'ih_has_guest_links', !empty($rows) ? 1 : 0);
+                // Drop leftover ACF repeater row meta when clearing.
+                if (empty($rows) && function_exists('delete_field')) {
+                    delete_field('ih_guest_links', $post_id);
+                }
                 continue;
             }
 

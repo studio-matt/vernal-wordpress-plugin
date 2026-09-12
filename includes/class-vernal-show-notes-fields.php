@@ -217,6 +217,152 @@ class Vernal_Show_Notes_Fields {
         return $tid;
     }
 
+    public static function is_elementor_edit_mode() {
+        if (!class_exists('\Elementor\Plugin')) {
+            return false;
+        }
+        $plugin = \Elementor\Plugin::$instance;
+        if (!empty($plugin->editor) && method_exists($plugin->editor, 'is_edit_mode')) {
+            return (bool) $plugin->editor->is_edit_mode();
+        }
+        return false;
+    }
+
+    public static function render_empty_notice($label) {
+        echo '<div class="ih-vernal-module-empty" style="padding:12px;border:1px dashed #c4b59a;color:#5a3e2b;background:#f7f1e8;font-size:13px;">';
+        echo esc_html(
+            sprintf(
+                'No %s on this preview post. Set Elementor preview to a published show, or Publish from Machine.',
+                $label
+            )
+        );
+        echo '</div>';
+    }
+
+    public static function load_gallery_for_post($post_id) {
+        $post_id = (int) $post_id;
+        if ($post_id <= 0) {
+            return array();
+        }
+        $urls = array();
+        $seen = array();
+        $add = function ($url) use (&$urls, &$seen) {
+            $url = is_string($url) ? trim($url) : '';
+            if ($url === '' || !preg_match('#^https?://#i', $url)) {
+                return;
+            }
+            if (isset($seen[$url])) {
+                return;
+            }
+            $seen[$url] = true;
+            $urls[] = $url;
+        };
+        if (function_exists('get_field')) {
+            $gal = get_field('ih_show_gallery', $post_id);
+            if (is_array($gal)) {
+                foreach ($gal as $item) {
+                    if (is_numeric($item)) {
+                        $src = wp_get_attachment_image_url((int) $item, 'large');
+                        $add($src ? $src : '');
+                    } elseif (is_array($item)) {
+                        if (!empty($item['url'])) {
+                            $add($item['url']);
+                        } elseif (!empty($item['ID'])) {
+                            $src = wp_get_attachment_image_url((int) $item['ID'], 'large');
+                            $add($src ? $src : '');
+                        }
+                    } elseif (is_string($item)) {
+                        $add($item);
+                    }
+                }
+            }
+        }
+        if (empty($urls)) {
+            $raw = function_exists('get_field')
+                ? get_field('ih_show_gallery_json', $post_id, false)
+                : get_post_meta($post_id, 'ih_show_gallery_json', true);
+            if (is_string($raw) && $raw !== '') {
+                $decoded = json_decode($raw, true);
+                if (is_array($decoded)) {
+                    foreach ($decoded as $item) {
+                        if (is_string($item)) {
+                            $add($item);
+                        } elseif (is_array($item) && !empty($item['url'])) {
+                            $add($item['url']);
+                        }
+                    }
+                }
+            }
+        }
+        return $urls;
+    }
+
+    public static function load_guest_card_for_post($post_id) {
+        $post_id = (int) $post_id;
+        $empty = array(
+            'name' => '',
+            'bio' => '',
+            'headshot_url' => '',
+            'socials' => array(),
+        );
+        if ($post_id <= 0) {
+            return $empty;
+        }
+        $read = function ($name) use ($post_id) {
+            if (function_exists('get_field')) {
+                $v = get_field($name, $post_id, false);
+                if ($v !== null && $v !== false && $v !== '') {
+                    return $v;
+                }
+            }
+            return get_post_meta($post_id, $name, true);
+        };
+        $name = trim((string) $read('ih_guests_name'));
+        if ($name === '') {
+            $name = trim((string) $read('ih_guest_name'));
+        }
+        $bio = trim((string) $read('ih_guest_bio'));
+        $headshot = $read('ih_guest_headshot');
+        $headshot_url = '';
+        if (is_numeric($headshot)) {
+            $src = wp_get_attachment_image_url((int) $headshot, 'large');
+            $headshot_url = $src ? $src : '';
+        } elseif (is_array($headshot) && !empty($headshot['url'])) {
+            $headshot_url = (string) $headshot['url'];
+        } elseif (is_string($headshot) && preg_match('#^https?://#i', $headshot)) {
+            $headshot_url = $headshot;
+        }
+        $social_map = array(
+            'Website' => $read('ih_personal_website'),
+            'Podcast' => $read('ih_podcast'),
+            'Instagram' => $read('ih_instagram'),
+            'YouTube' => $read('ih_youtube'),
+            'Facebook' => $read('ih_facebook'),
+            'LinkedIn' => $read('ih_linkedin'),
+            'X' => $read('ih_twitter'),
+            'TikTok' => $read('ih_tiktok'),
+            'Amazon' => $read('ih_amazon'),
+        );
+        $misc_url = trim((string) $read('ih_misc_link'));
+        $misc_label = trim((string) $read('ih_misc_label'));
+        if ($misc_url !== '') {
+            $social_map[$misc_label !== '' ? $misc_label : 'Link'] = $misc_url;
+        }
+        $socials = array();
+        foreach ($social_map as $label => $url) {
+            $url = is_string($url) ? trim($url) : '';
+            if ($url !== '' && preg_match('#^https?://#i', $url)) {
+                $socials[] = array('label' => $label, 'url' => $url);
+            }
+        }
+        return array(
+            'name' => $name,
+            'bio' => $bio,
+            'headshot_url' => $headshot_url,
+            'socials' => $socials,
+        );
+    }
+
     public static function load_rows_for_post($post_id) {
         $post_id = (int) $post_id;
         if ($post_id <= 0) {
@@ -345,7 +491,7 @@ class Vernal_Show_Notes_Fields {
                 'Guest Links',
                 'repeater',
                 array(
-                    'instructions' => 'Approved Guest Links from Machine (name, description, URL). Bind this repeater in Elementor. Set the URL widget to open in a new window.',
+                    'instructions' => 'Approved Guest Links from Machine (name, description, URL). Drop Elementor widget Vernal → Guest Links. Do not use Loop Grid. Display condition: ih_has_guest_links — never this repeater.',
                     'layout' => 'row',
                     'button_label' => 'Add guest link',
                     'sub_fields' => array($link_name, $link_description, $link_url),
@@ -357,7 +503,7 @@ class Vernal_Show_Notes_Fields {
                 'Guest Links JSON',
                 'textarea',
                 array(
-                    'instructions' => 'For Elementor Text Editor: outputs an HTML list (name, description, new-window URL). Prefer the Guest Links repeater for Loop widgets.',
+                    'instructions' => 'JSON backup of Guest Links. The Guest Links widget reads this when the repeater is empty. Do not bind this field for display.',
                     'rows' => 3,
                 )
             ),
@@ -367,7 +513,7 @@ class Vernal_Show_Notes_Fields {
                 'Guest Links HTML',
                 'wysiwyg',
                 array(
-                    'instructions' => 'Ready-to-render Guest Links list. Bind a Text Editor or HTML widget to this if you are not using a Repeater.',
+                    'instructions' => 'Fallback HTML list. Prefer Vernal → Guest Links. Bind a Text Editor only if the widget is unavailable.',
                 )
             ),
             self::field(
@@ -385,7 +531,7 @@ class Vernal_Show_Notes_Fields {
                 'Guest Link Name (this row)',
                 'text',
                 array(
-                    'instructions' => 'Loop item only. Bind this in a Loop whose source is Guest Links (ih_guest_links).',
+                    'instructions' => 'Legacy Loop bind. Prefer Vernal → Guest Links; operators should not bind repeater subfields.',
                 )
             ),
             self::field(
@@ -394,7 +540,7 @@ class Vernal_Show_Notes_Fields {
                 'Guest Link Description (this row)',
                 'textarea',
                 array(
-                    'instructions' => 'Loop item only. Description/snippet for the current Guest Links row.',
+                    'instructions' => 'Legacy Loop bind. Prefer Vernal → Guest Links.',
                     'rows' => 2,
                 )
             ),
@@ -404,7 +550,7 @@ class Vernal_Show_Notes_Fields {
                 'Guest Link URL (this row)',
                 'url',
                 array(
-                    'instructions' => 'Loop item only. Set the widget link to this field and Open in new window.',
+                    'instructions' => 'Legacy Loop bind. Prefer Vernal → Guest Links.',
                 )
             ),
             self::field('field_ih_personal_website', 'ih_personal_website', 'Personal Website', 'url', array(
@@ -426,6 +572,46 @@ class Vernal_Show_Notes_Fields {
             self::field('field_ih_misc_link', 'ih_misc_link', 'Misc Link', 'url', array(
                 'instructions' => 'Misc URL. Pair with Misc Link Label.',
             )),
+            self::field(
+                'field_ih_show_gallery',
+                'ih_show_gallery',
+                'Show Gallery',
+                'gallery',
+                array(
+                    'instructions' => 'Machine images for this show. Drop Elementor widget Vernal → Show Gallery. Display condition: ih_has_show_gallery.',
+                    'return_format' => 'array',
+                    'preview_size' => 'medium',
+                    'library' => 'all',
+                )
+            ),
+            self::field(
+                'field_ih_show_gallery_json',
+                'ih_show_gallery_json',
+                'Show Gallery JSON',
+                'textarea',
+                array(
+                    'instructions' => 'JSON URL list if the gallery is empty. Do not bind for display.',
+                    'rows' => 3,
+                )
+            ),
+            self::field(
+                'field_ih_has_show_gallery',
+                'ih_has_show_gallery',
+                'Has Show Gallery',
+                'true_false',
+                array(
+                    'instructions' => 'Use in Elementor Display Conditions. Never bind a gallery or repeater there.',
+                )
+            ),
+            self::field(
+                'field_ih_has_guest_card',
+                'ih_has_guest_card',
+                'Has Guest Card',
+                'true_false',
+                array(
+                    'instructions' => 'True when guest name, bio, or headshot exists. Display Conditions only.',
+                )
+            ),
         );
     }
 

@@ -144,6 +144,9 @@ class Vernal_Guest_Links_Widget extends \Elementor\Widget_Base {
             $rows = Vernal_Show_Notes_Fields::load_rows_for_post($post_id);
         }
         if (empty($rows)) {
+            if (class_exists('Vernal_Show_Notes_Fields') && Vernal_Show_Notes_Fields::is_elementor_edit_mode()) {
+                Vernal_Show_Notes_Fields::render_empty_notice('guest links');
+            }
             return;
         }
 
