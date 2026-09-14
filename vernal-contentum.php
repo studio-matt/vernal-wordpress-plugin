@@ -3,12 +3,12 @@
  * Plugin Name: Vernal Contentum Bridge
  * Plugin URI: https://vernalcontentum.com
  * Description: Bridge between WordPress and Vernal Contentum web app for content creation and management
- * Version: 1.5.8
+ * Version: 1.5.9
  * Author: Vernal Contentum
  * License: GPL v2 or later
  * Text Domain: vernal-contentum
  *
- * Last updated: Purge Airlift/page caches after show-notes; clear guest-links HTML.
+ * Last updated: Retry Machine match on 429 busy (internal linking).
  */
 
 // Exit if accessed directly
@@ -17,7 +17,7 @@ if (!defined('ABSPATH')) {
 }
 
 // Define plugin constants
-define('VERNAL_CONTENTUM_VERSION', '1.5.8');
+define('VERNAL_CONTENTUM_VERSION', '1.5.9');
 define('VERNAL_CONTENTUM_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('VERNAL_CONTENTUM_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('VERNAL_CONTENTUM_PLUGIN_BASENAME', plugin_basename(__FILE__));

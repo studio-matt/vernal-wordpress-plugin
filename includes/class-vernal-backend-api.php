@@ -126,13 +126,18 @@ class Vernal_Backend_API {
             $body = wp_remote_retrieve_body($response);
             $data = json_decode($body, true);
 
-            if (in_array((int) $status_code, array(502, 503, 504), true) && $attempt < $max_attempts) {
+            // 429 = Machine match semaphore full; 502/503/504 = transient gateway.
+            if (in_array((int) $status_code, array(429, 502, 503, 504), true) && $attempt < $max_attempts) {
                 $last_error = new WP_Error(
                     'api_error',
                     isset($data['detail']) ? $data['detail'] : __('Backend API request failed', 'vernal-contentum'),
                     array('status_code' => $status_code, 'response' => $data)
                 );
-                usleep(250000 * $attempt);
+                // Longer backoff on 429 so we do not burn the batch while slots clear.
+                $delay_us = ((int) $status_code === 429)
+                    ? (1000000 * $attempt)   // 1s, 2s, 3s
+                    : (250000 * $attempt);   // 0.25s, 0.5s, 0.75s
+                usleep($delay_us);
                 continue;
             }
 

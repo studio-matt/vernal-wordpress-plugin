@@ -1082,7 +1082,7 @@ class Vernal_Internal_Links {
             $resp = Vernal_Backend_API::request('plugin/internal-links/match', array(
                 'method'  => 'POST',
                 'body'    => $payload,
-                'timeout' => 60,
+                'timeout' => 90,
                 'retries' => 2,
             ));
             if (is_wp_error($resp)) {
@@ -1222,9 +1222,10 @@ class Vernal_Internal_Links {
             'rag_excluded_category_ids' => $this->rag_excluded_category_ids_for_match(),
         );
         $resp = Vernal_Backend_API::request('plugin/internal-links/match', array(
-            'method' => 'POST',
-            'body'   => $payload,
-            'timeout'=> 60,
+            'method'  => 'POST',
+            'body'    => $payload,
+            'timeout' => 90,
+            'retries' => 2,
         ));
         if (is_wp_error($resp)) {
             $out['errors']++;
