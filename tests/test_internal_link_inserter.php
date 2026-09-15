@@ -134,6 +134,31 @@ $r5 = Vernal_Internal_Link_Inserter::insert_link('<p>please click here now</p>',
 ));
 assert_true(!$r5['inserted'], 'rejects click here');
 
+// insertable_plain_text excludes headings / anchors (aligns with Machine grounding)
+$plain = Vernal_Internal_Link_Inserter::insertable_plain_text(
+    '<h2>Peptide Therapy Guide</h2><p>Patients ask about peptide therapy often.</p><p>See <a href="/x/">other</a>.</p>'
+);
+assert_true(stripos($plain, 'Peptide Therapy Guide') === false, 'plain excludes heading');
+assert_true(stripos($plain, 'peptide therapy often') !== false, 'plain keeps paragraph');
+assert_true(stripos($plain, 'other') === false, 'plain excludes existing anchor text');
+
+// HTML entity variant of phrase
+$html_ent = '<p>Health &amp; Wellness basics matter.</p>';
+$anchor_ent = '<a class="vernal-il" data-vernal-il="1" data-vernal-il-id="vil_ent" data-vernal-il-target="7" href="https://example.com/hw/">Health & Wellness</a>';
+$r_ent = Vernal_Internal_Link_Inserter::insert_into_html_fragment($html_ent, 'Health & Wellness', $anchor_ent);
+assert_true($r_ent['inserted'], 'inserts entity-encoded phrase');
+
+// Classic fallback when Gutenberg has no safe block match
+$blocks = "<!-- wp:heading --><h2>only in heading peptide therapy</h2><!-- /wp:heading -->\n"
+    . "<!-- wp:paragraph --><p>Body has peptide therapy for readers.</p><!-- /wp:paragraph -->";
+$r_blocks = Vernal_Internal_Link_Inserter::insert_link($blocks, array(
+    'phrase' => 'peptide therapy',
+    'target_wp_post_id' => 9,
+    'permalink' => 'https://example.com/p/',
+    'mutation_id' => 'vil_blk',
+));
+assert_true($r_blocks['inserted'], 'block walk or classic fallback inserts');
+
 if ($failed > 0) {
     echo "\n$failed failure(s)\n";
     exit(1);

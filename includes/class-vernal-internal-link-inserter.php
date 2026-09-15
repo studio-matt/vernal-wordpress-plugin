@@ -202,7 +202,21 @@ class Vernal_Internal_Link_Inserter {
                     'reason'   => 'ok_blocks',
                 );
             }
-            return array('content' => $content, 'inserted' => false, 'reason' => 'phrase_not_in_safe_blocks');
+            // Elementor / classic HTML often still lives in post_content alongside
+            // a block wrapper — try classic insert before giving up.
+            $classic = self::insert_into_html_fragment($content, $phrase, $anchor_html);
+            if (!empty($classic['inserted'])) {
+                return array(
+                    'content'  => $classic['html'],
+                    'inserted' => true,
+                    'reason'   => 'ok_classic_fallback',
+                );
+            }
+            return array(
+                'content'  => $content,
+                'inserted' => false,
+                'reason'   => !empty($classic['reason']) ? (string) $classic['reason'] : 'phrase_not_in_safe_blocks',
+            );
         }
 
         // Classic / freeform
@@ -335,19 +349,34 @@ class Vernal_Internal_Link_Inserter {
             $masked
         );
 
-        $pos = self::find_phrase_offset($masked, $phrase);
+        $pos = null;
+        $matched_phrase = $phrase;
+        foreach (self::phrase_search_variants($phrase) as $variant) {
+            $pos = self::find_phrase_offset($masked, $variant);
+            if ($pos !== null) {
+                $matched_phrase = $variant;
+                break;
+            }
+        }
         if ($pos === null) {
             return array('html' => $html, 'inserted' => false, 'reason' => 'phrase_not_found_eligible');
         }
 
-        $len = strlen($phrase);
+        $len = strlen($matched_phrase);
         // Use actual casing from content
         $found = substr($masked, $pos, $len);
         // Rebuild anchor with found casing if phrase matched case-insensitively
+        $display = $found;
+        if (strcasecmp($found, $phrase) !== 0 && strcasecmp(html_entity_decode($found, ENT_QUOTES | ENT_HTML5, 'UTF-8'), $phrase) === 0) {
+            $display = html_entity_decode($found, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        }
         if (strcasecmp($found, $phrase) === 0 && $found !== $phrase) {
+            $display = $found;
+        }
+        if ($display !== $phrase) {
             $anchor_html = preg_replace(
                 '/>' . preg_quote(esc_html($phrase), '/') . '</',
-                '>' . esc_html($found) . '<',
+                '>' . esc_html($display) . '<',
                 $anchor_html,
                 1
             );
@@ -356,6 +385,29 @@ class Vernal_Internal_Link_Inserter {
         $new_masked = substr($masked, 0, $pos) . $anchor_html . substr($masked, $pos + $len);
         $restored = strtr($new_masked, $masks);
         return array('html' => $restored, 'inserted' => true, 'reason' => 'ok');
+    }
+
+    /**
+     * Phrase spellings that may appear in HTML (entities / decoded).
+     *
+     * @param string $phrase
+     * @return string[]
+     */
+    public static function phrase_search_variants($phrase) {
+        $phrase = (string) $phrase;
+        $out = array();
+        foreach (array(
+            $phrase,
+            html_entity_decode($phrase, ENT_QUOTES | ENT_HTML5, 'UTF-8'),
+            htmlspecialchars($phrase, ENT_QUOTES | ENT_HTML5, 'UTF-8'),
+        ) as $v) {
+            $v = (string) $v;
+            if ($v === '') {
+                continue;
+            }
+            $out[$v] = true;
+        }
+        return array_keys($out);
     }
 
     /**
@@ -395,6 +447,33 @@ class Vernal_Internal_Link_Inserter {
             return $pos;
         }
         return null;
+    }
+
+    /**
+     * Plain text Machine should ground against — same regions the inserter can link.
+     * Headings, existing anchors, code, and shortcodes are excluded so MATCH ≠ INSERT
+     * does not invent phrases that only live in masked regions.
+     *
+     * @param string $content post_content HTML
+     * @return string
+     */
+    public static function insertable_plain_text($content) {
+        $html = (string) $content;
+        if ($html === '') {
+            return '';
+        }
+        $masked = preg_replace('/<(h[1-6]|a|script|style|code|pre)\b[^>]*>.*?<\/\1>/is', ' ', $html);
+        if (!is_string($masked)) {
+            $masked = $html;
+        }
+        $masked = preg_replace('/\[[^\]]+\]/', ' ', $masked);
+        if (!is_string($masked)) {
+            $masked = $html;
+        }
+        $plain = wp_strip_all_tags($masked);
+        $plain = html_entity_decode($plain, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $plain = preg_replace('/\s+/u', ' ', $plain);
+        return is_string($plain) ? trim($plain) : '';
     }
 
     /**

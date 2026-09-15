@@ -1128,44 +1128,101 @@ class Vernal_Internal_Links {
             $permalink = get_permalink($target_id);
             $out['grounding_attempted']++;
             $anchors = isset($row['anchors']) && is_array($row['anchors']) ? $row['anchors'] : array();
-            $phrase = '';
-            if ($anchors && !empty($anchors[0]['text'])) {
-                $phrase = (string) $anchors[0]['text'];
-            } else {
+            $phrase_candidates = array();
+            foreach ($anchors as $anchor_row) {
+                if (!is_array($anchor_row) || empty($anchor_row['text'])) {
+                    continue;
+                }
+                $t = trim((string) $anchor_row['text']);
+                if ($t !== '') {
+                    $phrase_candidates[] = $t;
+                }
+            }
+            if (!$phrase_candidates) {
                 // Last-resort title local-ground only; Machine resolver owns primary grounding.
                 $target_post = get_post($target_id);
                 if ($target_post) {
-                    $phrase = $this->local_ground_phrase($content, $target_post);
+                    $local = $this->local_ground_phrase($content, $target_post);
+                    if ($local !== '') {
+                        $phrase_candidates[] = $local;
+                    }
                 }
             }
-            if ($phrase === '') {
+            if (!$phrase_candidates) {
                 $bump('no_grounded_anchor');
                 $skip_targets[] = $target_id;
                 continue;
             }
             $out['grounded_targets']++;
-            if ($this->is_generic_anchor($phrase) || in_array(strtolower($phrase), $used_anchors, true)) {
-                $bump('anchor_rejected');
-                $skip_targets[] = $target_id;
-                continue;
+
+            $ins = null;
+            $phrase = '';
+            $mutation_id = '';
+            foreach ($phrase_candidates as $cand_phrase) {
+                if ($this->is_generic_anchor($cand_phrase) || in_array(strtolower($cand_phrase), $used_anchors, true)) {
+                    continue;
+                }
+                $try_id = Vernal_Internal_Link_Inserter::new_mutation_id();
+                $try = Vernal_Internal_Link_Inserter::insert_link($content, array(
+                    'phrase'            => $cand_phrase,
+                    'target_wp_post_id' => $target_id,
+                    'permalink'         => $permalink,
+                    'mutation_id'       => $try_id,
+                ));
+                if (!empty($try['inserted'])) {
+                    $ins = $try;
+                    $phrase = $cand_phrase;
+                    $mutation_id = $try_id;
+                    break;
+                }
+                // Keep last failure for skip reason.
+                $ins = $try;
             }
-            $mutation_id = Vernal_Internal_Link_Inserter::new_mutation_id();
-            $ins = Vernal_Internal_Link_Inserter::insert_link($content, array(
-                'phrase'            => $phrase,
-                'target_wp_post_id' => $target_id,
-                'permalink'         => $permalink,
-                'mutation_id'       => $mutation_id,
-            ));
+            // Machine phrase often lands only in a heading; try title local-ground once.
+            if (empty($ins['inserted'])) {
+                $target_post = get_post($target_id);
+                if ($target_post) {
+                    $local = $this->local_ground_phrase($content, $target_post);
+                    if (
+                        $local !== ''
+                        && !in_array(strtolower($local), array_map('strtolower', $phrase_candidates), true)
+                        && !$this->is_generic_anchor($local)
+                        && !in_array(strtolower($local), $used_anchors, true)
+                    ) {
+                        $try_id = Vernal_Internal_Link_Inserter::new_mutation_id();
+                        $try = Vernal_Internal_Link_Inserter::insert_link($content, array(
+                            'phrase'            => $local,
+                            'target_wp_post_id' => $target_id,
+                            'permalink'         => $permalink,
+                            'mutation_id'       => $try_id,
+                        ));
+                        if (!empty($try['inserted'])) {
+                            $ins = $try;
+                            $phrase = $local;
+                            $mutation_id = $try_id;
+                        }
+                    }
+                }
+            }
             if (empty($ins['inserted'])) {
                 $out['insert_failed']++;
-                $bump('phrase_not_found_in_body');
+                $reason = isset($ins['reason']) ? (string) $ins['reason'] : 'phrase_not_found_in_body';
+                // Map inserter reasons to admin-facing skip codes.
+                if (in_array($reason, array('phrase_not_found_eligible', 'phrase_not_in_safe_blocks', 'empty', 'mask_failed'), true)) {
+                    $reason = 'phrase_not_found_in_body';
+                } elseif ($reason === 'already_vernal_target' || $reason === 'already_href') {
+                    $reason = 'duplicate_or_existing_edge';
+                } elseif ($reason === 'banned_anchor') {
+                    $reason = 'anchor_rejected';
+                }
+                $bump($reason !== '' ? $reason : 'phrase_not_found_in_body');
                 $skip_targets[] = $target_id;
                 continue;
             }
             $content = $ins['content'];
             $edge_role = isset($row['edge_role']) ? sanitize_key((string) $row['edge_role']) : 'other_relevant';
             $entry = array(
-                'id'                    => $mutation_id,
+                'id'                    => $mutation_id !== '' ? $mutation_id : Vernal_Internal_Link_Inserter::new_mutation_id(),
                 'source_wp_post_id'     => (int) $post->ID,
                 'target_wp_post_id'     => $target_id,
                 'target_url'            => $permalink,
@@ -1302,7 +1359,7 @@ class Vernal_Internal_Links {
     }
 
     private function local_ground_phrase($content, $target_post) {
-        $plain = html_entity_decode(wp_strip_all_tags($content), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $plain = Vernal_Internal_Link_Inserter::insertable_plain_text($content);
         $title = html_entity_decode(get_the_title($target_post), ENT_QUOTES | ENT_HTML5, 'UTF-8');
         $candidates = array();
         if ($title) {
@@ -1449,17 +1506,19 @@ class Vernal_Internal_Links {
     private function post_to_match_source($post) {
         $cats = wp_get_post_categories($post->ID);
         list($primary_kp, $secondary_kp) = $this->post_seo_keyphrases($post);
+        $insertable = Vernal_Internal_Link_Inserter::insertable_plain_text($post->post_content);
         return array(
             'wp_post_id'            => (int) $post->ID,
             'title'                 => get_the_title($post),
             'excerpt'               => get_the_excerpt($post),
-            'content_text'          => wp_strip_all_tags($post->post_content),
+            // Ground only against text the inserter can actually wrap.
+            'content_text'          => $insertable,
             'category_ids'          => array_map('intval', $cats),
             'permalink'             => get_permalink($post),
             'primary_keyphrase'     => $primary_kp,
             'secondary_keyphrases'  => $secondary_kp,
             'published_at'          => $post->post_date_gmt,
-            'word_count'            => str_word_count(wp_strip_all_tags($post->post_content)),
+            'word_count'            => str_word_count($insertable),
         );
     }
 
