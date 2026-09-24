@@ -1593,10 +1593,26 @@ class Vernal_API {
     }
     
     /**
+     * ACF / Elementor fields that must keep paragraph HTML (not sanitize_text_field).
+     *
+     * @return string[]
+     */
+    private function html_meta_keys() {
+        return array(
+            'ih_show_summary',
+            'ih_transcript',
+            'ih_guest_bio',
+            'ih_guest_links_html',
+        );
+    }
+
+    /**
      * Persist post meta; arrays/objects stored as native PHP values.
      *
      * Important: ACF Gallery/Image fields must receive real PHP arrays of attachment
      * IDs — JSON strings break Elementor ACF Gallery dynamic tags.
+     * HTML fields use wp_kses_post — sanitize_text_field strips &lt;p&gt; and collapses
+     * whitespace into run-on summary/transcript on the public landing.
      */
     private function set_post_meta_value($post_id, $key, $value) {
         $meta_key = sanitize_key($key);
@@ -1606,6 +1622,10 @@ class Vernal_API {
         }
         if (is_bool($value)) {
             update_post_meta($post_id, $meta_key, $value ? '1' : '0');
+            return;
+        }
+        if (is_string($value) && in_array($meta_key, $this->html_meta_keys(), true)) {
+            update_post_meta($post_id, $meta_key, wp_kses_post($value));
             return;
         }
         update_post_meta($post_id, $meta_key, is_string($value) ? sanitize_text_field($value) : $value);
@@ -1748,12 +1768,14 @@ class Vernal_API {
                 continue;
             }
 
-            if ($target_key === 'ih_guest_links_html') {
-                $raw = is_string($value) ? ltrim($value) : '';
-                if ($raw !== '' && isset($raw[0]) && $raw[0] === '<') {
-                    $this->set_acf_or_meta($post_id, 'ih_guest_links_html', $value);
-                    continue;
-                }
+            // Preserve paragraph HTML for show landing tabs (Elementor binds these).
+            // Always mirror to post meta — ACF textarea fields / sanitize_text_field
+            // otherwise strip tags into run-on text.
+            if (in_array($target_key, $this->html_meta_keys(), true)) {
+                $html = is_string($value) ? wp_kses_post($value) : '';
+                $this->set_acf_or_meta($post_id, $target_key, $html);
+                update_post_meta($post_id, $target_key, $html);
+                continue;
             }
             if ($target_key === 'ih_guest_links' || $target_key === 'ih_guest_links_json') {
                 $rows = $this->normalize_guest_links_rows($value);
