@@ -903,8 +903,16 @@ class Vernal_API {
         }
         if (!empty($params['powerpress']) && is_array($params['powerpress'])) {
             $incoming_url = isset($params['powerpress']['media_url']) ? trim((string) $params['powerpress']['media_url']) : '';
-            $has_valid_existing = $existing_enclosure && !empty($existing_enclosure['media_url']);
-            if ($preserve && $has_valid_existing) {
+            $existing_url = ($existing_enclosure && !empty($existing_enclosure['media_url']))
+                ? trim((string) $existing_enclosure['media_url'])
+                : '';
+            $existing_length = ($existing_enclosure && isset($existing_enclosure['length']))
+                ? intval($existing_enclosure['length'])
+                : 0;
+            // Preserve only blocks replacing a *usable* enclosure (URL + nonzero size).
+            // Zero-length enclosures hide the PowerPress player on listing/detail loops.
+            $has_usable_existing = ($existing_url !== '' && $existing_length > 0);
+            if ($preserve && $has_usable_existing) {
                 // Hard invariant: do not replace a valid legacy enclosure on retrofit.
             } elseif ($incoming_url !== '') {
                 $this->set_powerpress_enclosure($post_id, $params['powerpress']);
