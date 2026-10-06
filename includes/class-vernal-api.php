@@ -847,6 +847,7 @@ class Vernal_API {
         $existing_enclosure = $this->read_powerpress_enclosure($post_id);
 
         $updated_keys = array();
+        $redirect_clear = null;
         if (!empty($params['title'])) {
             $update = array(
                 'ID' => $post_id,
@@ -900,6 +901,72 @@ class Vernal_API {
                 'post_status' => $params['status'],
             ));
             $updated_keys[] = 'status';
+        }
+        // Live rename / permalink heal (plugin API key; bypasses wp/v2 edit caps).
+        // Never rewrite slug when preserve_publication is set (retrofit invariant).
+        $slug_changed_from = '';
+        if (!$preserve && !empty($params['slug']) && is_string($params['slug'])) {
+            $want_slug = sanitize_title($params['slug']);
+            if ($want_slug !== '') {
+                $slug_changed_from = (string) $post->post_name;
+                $unique = wp_unique_post_slug(
+                    $want_slug,
+                    $post_id,
+                    $post->post_status,
+                    $post->post_type,
+                    (int) $post->post_parent
+                );
+                wp_update_post(array(
+                    'ID' => $post_id,
+                    'post_name' => $unique,
+                ));
+                $updated_keys[] = 'slug';
+                $post = get_post($post_id);
+            }
+        }
+        // Drop stale Redirection rows that 404 the landing after a guest/title rename.
+        $redirect_clear = null;
+        if (!empty($params['clear_redirects']) || $slug_changed_from !== '') {
+            $needles = array();
+            if ($slug_changed_from !== '') {
+                $needles[] = $slug_changed_from;
+            }
+            if (!empty($params['clear_redirects']) && is_array($params['clear_redirects'])) {
+                foreach ($params['clear_redirects'] as $n) {
+                    $n = sanitize_title((string) $n);
+                    if ($n !== '') {
+                        $needles[] = $n;
+                    }
+                }
+            } elseif (!empty($params['clear_redirects']) && is_string($params['clear_redirects'])) {
+                $n = sanitize_title($params['clear_redirects']);
+                if ($n !== '') {
+                    $needles[] = $n;
+                }
+            }
+            if ($post && !empty($post->post_name)) {
+                $needles[] = (string) $post->post_name;
+            }
+            $redirect_clear = $this->clear_stale_permalink_redirects(array_values(array_unique($needles)));
+            if (!empty($redirect_clear['deleted'])) {
+                $updated_keys[] = 'clear_redirects';
+            }
+        }
+        // Hard-delete an orphan draft created by a failed identity resync.
+        if (!$preserve && !empty($params['force_delete'])) {
+            $deleted = wp_delete_post($post_id, true);
+            if ($deleted) {
+                return rest_ensure_response(array(
+                    'success' => true,
+                    'data' => array(
+                        'id' => $post_id,
+                        'deleted' => true,
+                        'updated_keys' => array_values(array_unique(array_merge($updated_keys, array('force_delete')))),
+                        'redirect_clear' => $redirect_clear,
+                        'plugin_version' => defined('VERNAL_CONTENTUM_VERSION') ? VERNAL_CONTENTUM_VERSION : null,
+                    ),
+                ));
+            }
         }
         if (!empty($params['powerpress']) && is_array($params['powerpress'])) {
             $incoming_url = isset($params['powerpress']['media_url']) ? trim((string) $params['powerpress']['media_url']) : '';
@@ -1014,8 +1081,76 @@ class Vernal_API {
                 'plugin_version' => defined('VERNAL_CONTENTUM_VERSION') ? VERNAL_CONTENTUM_VERSION : null,
                 'gallery_debug' => $this->debug_partner_gallery($post_id),
                 'cache_purge' => $cache_purge,
+                'redirect_clear' => $redirect_clear,
             ),
         ));
+    }
+
+    /**
+     * Remove Redirection plugin rows that strand a renamed show landing on a 404.
+     *
+     * Guest/title renames sometimes leave rules like:
+     *   /doug-bates-following-synchronicity/ → /doug-beitz-doug-bates-following-synchronicity/
+     * where the target was never published.
+     *
+     * @param array $needles Slug fragments to match against url / action_data.
+     * @return array{deleted:int,table:?string,matched:array<int,array{id:int,url:string,action_data:string}>}
+     */
+    private function clear_stale_permalink_redirects($needles) {
+        $out = array(
+            'deleted' => 0,
+            'table' => null,
+            'matched' => array(),
+        );
+        $needles = array_values(array_filter(array_map('strval', (array) $needles)));
+        if (empty($needles)) {
+            return $out;
+        }
+        global $wpdb;
+        $table = $wpdb->prefix . 'redirection_items';
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+        if ($exists !== $table) {
+            return $out;
+        }
+        $out['table'] = $table;
+        $like_parts = array();
+        $args = array();
+        foreach ($needles as $n) {
+            $n = trim($n, '/');
+            if ($n === '') {
+                continue;
+            }
+            $like_parts[] = '(url LIKE %s OR action_data LIKE %s)';
+            $args[] = '%' . $wpdb->esc_like($n) . '%';
+            $args[] = '%' . $wpdb->esc_like($n) . '%';
+        }
+        if (empty($like_parts)) {
+            return $out;
+        }
+        $sql = 'SELECT id, url, action_data FROM ' . $table . ' WHERE ' . implode(' OR ', $like_parts);
+        // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+        $rows = $wpdb->get_results($wpdb->prepare($sql, $args), ARRAY_A);
+        if (empty($rows)) {
+            return $out;
+        }
+        $ids = array();
+        foreach ($rows as $row) {
+            $ids[] = (int) $row['id'];
+            $out['matched'][] = array(
+                'id' => (int) $row['id'],
+                'url' => (string) $row['url'],
+                'action_data' => (string) $row['action_data'],
+            );
+        }
+        if (empty($ids)) {
+            return $out;
+        }
+        $id_list = implode(',', array_map('intval', $ids));
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $deleted = $wpdb->query("DELETE FROM {$table} WHERE id IN ({$id_list})");
+        $out['deleted'] = is_numeric($deleted) ? (int) $deleted : 0;
+        return $out;
     }
 
     /**
