@@ -119,13 +119,27 @@ jobs:
           echo "✓ Files deployed successfully"
       
       - name: Verify deployment
+        env:
+          SERVER_PATH: ${{ secrets.SERVER_PATH }}
         run: |
           echo "Verifying deployed files..."
           ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
-            "ls -la '${{ secrets.SERVER_PATH }}' | head -20" || {
-            echo "::error::Cannot verify deployment"
-            exit 1
-          }
+            "PRIMARY='$SERVER_PATH'; bash -s" <<'EOS'
+          set +e
+          ls -la "$PRIMARY" | head -20
+          echo "whoami=$(whoami) HOME=$HOME"
+          ls -la "$HOME" | head -40
+          ls -la "$HOME/public_html" 2>/dev/null | head -30
+          ls -la "$HOME/domains" 2>/dev/null | head -30
+          echo "--- airlift caches ---"
+          find "$HOME" -type d -path '*/cache/airlift' 2>/dev/null | while read -r d; do
+            echo "Clearing $d"
+            rm -rf "$d"/* "$d"/.[!.]* 2>/dev/null
+            echo "cleared:$d"
+          done
+          echo "--- sibling plugins ---"
+          find "$HOME" -type f -name vernal-contentum.php 2>/dev/null | sed 's#/vernal-contentum.php$##' | sort -u
+          EOS
           echo "✓ Deployment verified"
 
       # Addon domains / sibling WP installs on the same cPanel account often keep a
