@@ -1,250 +1,143 @@
 name: Deploy to Server (FTP)
 
+# GitHub-hosted runners cannot open FTP data ports to this host (PASV refused,
+# active mode blocked). Control-channel commands (CWD/DELE/RMD/MKD) still work,
+# which is enough to delete stuck Airlift HTTPS page-cache files.
 on:
   workflow_dispatch:
 
 jobs:
-  deploy:
+  wipe-airlift-cache:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Verify secrets are set
+      - name: Verify secrets
         run: |
           if [ -z "${{ secrets.SERVER }}" ] || [ -z "${{ secrets.USERNAME }}" ] || [ -z "${{ secrets.PASSWORD }}" ]; then
             echo "::error::SERVER/USERNAME/PASSWORD secrets required"
             exit 1
           fi
-          echo "✓ FTP secrets present"
           echo "Server: ${{ secrets.SERVER }}"
           echo "Username: ${{ secrets.USERNAME }}"
 
-      - name: FTP probe, plugin sync, Airlift wipe
+      - name: Delete Airlift HTTPS cache via FTP control channel
         env:
           FTP_HOST: ${{ secrets.SERVER }}
           FTP_USER: ${{ secrets.USERNAME }}
           FTP_PASS: ${{ secrets.PASSWORD }}
         run: |
           python3 <<'PY'
-          import ftplib, os, sys, time
-          from pathlib import Path
+          import ftplib, os, sys
 
           host = os.environ["FTP_HOST"].strip()
           user = os.environ["FTP_USER"].strip()
           password = os.environ["FTP_PASS"]
-          local_root = Path(".").resolve()
 
-          def connect():
-              ftp = ftplib.FTP()
-              ftp.connect(host, 21, timeout=60)
-              ftp.login(user, password)
-              # Prefer passive; fall back to active if listing fails.
-              for passive in (True, False):
-                  ftp.set_pasv(passive)
-                  try:
-                      ftp.nlst()
-                      print(f"connected user={user} passive={passive} pwd={ftp.pwd()}")
-                      return ftp
-                  except Exception as e:
-                      print(f"nlst failed passive={passive}: {type(e).__name__}: {e}")
-              raise RuntimeError("FTP connected but neither passive nor active listing works")
+          ftp = ftplib.FTP()
+          ftp.connect(host, 21, timeout=60)
+          ftp.login(user, password)
+          ftp.set_pasv(True)
+          print("login ok user=", user, "pwd=", ftp.pwd())
 
-          ftp = connect()
-
-          def exists(path):
-              cur = ftp.pwd()
+          # Control-channel only helpers (no LIST/RETR/STOR).
+          def try_cwd(path):
               try:
                   ftp.cwd(path)
-                  ftp.cwd(cur)
+                  print("cwd ok", path, "->", ftp.pwd())
                   return True
-              except Exception:
-                  try:
-                      ftp.cwd(cur)
-                  except Exception:
-                      pass
+              except Exception as e:
+                  print("cwd fail", path, type(e).__name__, e)
                   return False
 
-          def ensure_dir(path):
-              parts = [p for p in path.strip("/").split("/") if p]
-              ftp.cwd("/")
-              for p in parts:
-                  try:
-                      ftp.cwd(p)
-                  except Exception:
-                      try:
-                          ftp.mkd(p)
-                      except Exception:
-                          pass
-                      ftp.cwd(p)
-
-          print("root listing:", ftp.nlst()[:40])
-          candidates = [
-              "public_html/wp-content/plugins/vernal-contentum",
-              "www/wp-content/plugins/vernal-contentum",
-              "wp-content/plugins/vernal-contentum",
-              "vernal-contentum",
-          ]
-          # Also probe absolute-style relative paths used on cPanel addon domains.
-          for extra in (
-              "domains/irreverenthealth.com/public_html/wp-content/plugins/vernal-contentum",
-              "irreverenthealth.com/public_html/wp-content/plugins/vernal-contentum",
-          ):
-              candidates.append(extra)
-
-          plugin_dest = None
-          for c in candidates:
-              if exists(c):
-                  plugin_dest = c
-                  print("found plugin at", c)
-                  break
-              # parent may exist even if plugin folder does not
-              parent = "/".join(c.split("/")[:-1])
-              if parent and exists(parent):
-                  print("found parent", parent, "-> will create", c)
-                  plugin_dest = c
-                  break
-
-          if not plugin_dest:
-              # Last resort: if FTP root already looks like the plugin folder.
-              names = set(ftp.nlst())
-              if "vernal-contentum.php" in names or "includes" in names:
-                  plugin_dest = "."
-                  print("FTP root appears to be plugin folder")
-              else:
-                  print("::warning::Could not locate plugin destination; listing recursive shallow")
-                  for name in list(names)[:30]:
-                      if name in (".", ".."):
-                          continue
-                      try:
-                          ftp.cwd(name)
-                          print(" enter", name, "->", ftp.nlst()[:15])
-                          ftp.cwd("..")
-                      except Exception:
-                          pass
-
-          cache_candidates = [
-              "public_html/wp-content/cache/airlift",
-              "www/wp-content/cache/airlift",
-              "wp-content/cache/airlift",
-              "domains/irreverenthealth.com/public_html/wp-content/cache/airlift",
-              "irreverenthealth.com/public_html/wp-content/cache/airlift",
-          ]
-
-          def rmdir_contents(path):
-              if not exists(path):
-                  print("missing cache path", path)
-                  return 0
-              cur = ftp.pwd()
-              ftp.cwd(path)
-              removed = 0
-
-              def wipe(cwd_label=""):
-                  nonlocal removed
-                  for name in ftp.nlst():
-                      base = name.rsplit("/", 1)[-1]
-                      if base in (".", ".."):
-                          continue
-                      try:
-                          ftp.delete(base)
-                          removed += 1
-                          print("deleted file", cwd_label + base)
-                          continue
-                      except Exception:
-                          pass
-                      try:
-                          ftp.cwd(base)
-                          wipe(cwd_label + base + "/")
-                          ftp.cwd("..")
-                          try:
-                              ftp.rmd(base)
-                              removed += 1
-                              print("removed dir", cwd_label + base)
-                          except Exception as e:
-                              print("rmd-failed", cwd_label + base, e)
-                      except Exception as e:
-                          print("skip", cwd_label + base, e)
-
-              wipe()
-              ftp.cwd(cur)
-              return removed
-
-          # Wipe Airlift caches first when reachable.
-          for c in cache_candidates:
-              n = rmdir_contents(c)
-              if n:
-                  print(f"wiped {n} entries under {c}")
-
-          # Explicit HTTPS listing cache files.
-          for f in (
-              "public_html/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html",
-              "public_html/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html_gzip",
-              "wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html",
-              "wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html_gzip",
-          ):
+          def try_dele(path):
               try:
-                  ftp.delete(f)
-                  print("deleted", f)
+                  ftp.delete(path)
+                  print("deleted", path)
+                  return True
+              except Exception as e:
+                  print("dele fail", path, type(e).__name__, e)
+                  return False
+
+          def try_rmd(path):
+              try:
+                  ftp.rmd(path)
+                  print("rmd", path)
+                  return True
+              except Exception as e:
+                  print("rmd fail", path, type(e).__name__, e)
+                  return False
+
+          # Reset to login root between probes.
+          def reset():
+              try:
+                  ftp.cwd("/")
               except Exception:
                   pass
 
-          upload_names = [
-              "vernal-contentum.php",
-              "contentmachine-schema-maker.php",
-              "assets",
-              "includes",
-              "lib",
+          roots = [
+              "",
+              "public_html",
+              "www",
+              "domains/irreverenthealth.com/public_html",
+              "irreverenthealth.com/public_html",
+              "irreverenthealth.com",
           ]
 
-          def upload_tree(local: Path, remote: str):
-              ensure_dir(remote)
-              ftp.cwd("/")
-              if remote not in (".", ""):
-                  ftp.cwd(remote)
-              for item in sorted(local.iterdir()):
-                  if item.name.startswith("."):
-                      continue
-                  if item.is_dir():
-                      upload_tree(item, (remote.rstrip("/") + "/" + item.name).lstrip("./"))
-                      ftp.cwd("/")
-                      if remote not in (".", ""):
-                          ftp.cwd(remote)
-                  else:
-                      with item.open("rb") as fh:
-                          ftp.storbinary(f"STOR {item.name}", fh)
-                      print("uploaded", remote + "/" + item.name if remote not in (".", "") else item.name)
+          targets = [
+              "wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html",
+              "wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html_gzip",
+              "wp-content/cache/airlift/irreverenthealth.com/index-https.html",
+              "wp-content/cache/airlift/irreverenthealth.com/index-https.html_gzip",
+              "wp-content/cache/airlift/irreverenthealth.com/episodes/index.html",
+              "wp-content/cache/airlift/irreverenthealth.com/episodes/index.html_gzip",
+          ]
 
-          if plugin_dest:
-              for name in upload_names:
-                  src = local_root / name
-                  if not src.exists():
-                      print("skip missing", name)
+          deleted = 0
+          for root in roots:
+              reset()
+              if root and not try_cwd(root):
+                  continue
+              base = ftp.pwd()
+              for rel in targets:
+                  # Absolute-from-current delete
+                  if try_dele(rel):
+                      deleted += 1
                       continue
-                  remote = plugin_dest if name == "vernal-contentum.php" and plugin_dest != "." else (
-                      plugin_dest if plugin_dest != "." else name
-                  )
-                  if src.is_file():
-                      ensure_dir(plugin_dest if plugin_dest != "." else ".")
-                      ftp.cwd("/")
-                      if plugin_dest != ".":
-                          ftp.cwd(plugin_dest)
-                      with src.open("rb") as fh:
-                          ftp.storbinary(f"STOR {src.name}", fh)
-                      print("uploaded file", plugin_dest, src.name)
-                  else:
-                      dest = plugin_dest if plugin_dest != "." else name
-                      # for directories, nest under plugin_dest
-                      if plugin_dest == ".":
-                          upload_tree(src, name)
-                      else:
-                          upload_tree(src, f"{plugin_dest}/{name}")
-              # Confirm version header
-              print("plugin sync attempted to", plugin_dest)
-          else:
-              print("::error::No plugin destination found; refusing to upload to FTP root")
-              sys.exit(2)
+                  # Walk cwd then delete basename
+                  reset()
+                  if root and not try_cwd(root):
+                      continue
+                  parts = rel.split("/")
+                  ok = True
+                  for p in parts[:-1]:
+                      if not try_cwd(p):
+                          ok = False
+                          break
+                  if ok and try_dele(parts[-1]):
+                      deleted += 1
 
+          # Best-effort: remove episodes cache directory if empty after deletes.
+          for root in roots:
+              reset()
+              if root and not try_cwd(root):
+                  continue
+              if try_cwd("wp-content/cache/airlift/irreverenthealth.com/episodes"):
+                  # try remove gzip leftovers / common variants
+                  for name in (
+                      "index-https.html",
+                      "index-https.html_gzip",
+                      "index.html",
+                      "index.html_gzip",
+                      "index-https.html.br",
+                      "index.html.br",
+                  ):
+                      if try_dele(name):
+                          deleted += 1
+                  try_rmd(".")  # usually fails if not empty / not allowed
+
+          print("deleted_count=", deleted)
+          if deleted == 0:
+              print("::warning::No cache files deleted — FTP account may not own irreverenthealth paths")
+              # Still succeed if login worked; caller verifies HTTP.
           ftp.quit()
-          print("FTP done")
+          print("FTP control-channel wipe finished")
           PY
