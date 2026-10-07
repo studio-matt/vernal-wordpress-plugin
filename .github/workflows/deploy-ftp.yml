@@ -1,60 +1,14 @@
 name: Deploy to Server (FTP)
 
+# Disabled: GitHub-hosted runners cannot open Pure-FTPd PASV data ports to this
+# host, and the FTP account is jailed outside irreverenthealth public_html.
+# Irreverent plugin/cache updates require WHM/root, irreverenthealth cPanel/FTP,
+# WP admin (Airlift purge), or the plugin self-update endpoint once >= 1.5.12.
 on:
   workflow_dispatch:
 
 jobs:
-  wipe-airlift-cache:
+  noop:
     runs-on: ubuntu-latest
     steps:
-      - name: FTP control-channel probe + wipe
-        env:
-          FTP_HOST: ${{ secrets.SERVER }}
-          FTP_USER: ${{ secrets.USERNAME }}
-          FTP_PASS: ${{ secrets.PASSWORD }}
-        run: |
-          python3 <<'PY'
-          import ftplib, os
-          host=os.environ["FTP_HOST"].strip(); user=os.environ["FTP_USER"].strip(); password=os.environ["FTP_PASS"]
-          ftp=ftplib.FTP(); ftp.connect(host,21,timeout=60); ftp.login(user,password)
-          print("USER=", user)
-          print("PWD=", ftp.pwd())
-          # Try STAT for listing without data connection
-          for cmd in ("STAT", "STAT .", "STAT /", "SITE HELP", "FEAT"):
-            try:
-              print(cmd, "=>", ftp.sendcmd(cmd)[:500])
-            except Exception as e:
-              print(cmd, "ERR", e)
-          probes=[
-            "public_html","www","mail","etc","tmp","includes","lib","assets","tests",
-            "vernal-contentum.php","wp-content","wp-admin","wp-includes",
-            "cache","airlift","domains","irreverenthealth.com",
-            "home","home/irreverenthealth","home/irreverenthealth/public_html",
-            "../public_html","../../public_html",
-            "public_html/wp-content","public_html/wp-content/cache",
-            "public_html/wp-content/cache/airlift",
-            "public_html/wp-content/plugins/vernal-contentum",
-            "public_html/wp-content/plugins/vernal-contentum/vernal-contentum.php",
-          ]
-          def cwd(p):
-            try:
-              ftp.cwd(p); print("CWD OK", p, "now", ftp.pwd()); return True
-            except Exception as e:
-              print("CWD NO", p, e); return False
-          for p in probes:
-            try: ftp.cwd("/")
-            except Exception: pass
-            cwd(p)
-          # SIZE command (control channel) for known files
-          for f in [
-            "vernal-contentum.php",
-            "includes/class-vernal-api.php",
-            "public_html/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html",
-            "wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html",
-          ]:
-            try:
-              print("SIZE", f, ftp.size(f))
-            except Exception as e:
-              print("SIZE NO", f, e)
-          ftp.quit()
-          PY
+      - run: echo "FTP deploy disabled — see workflow comment."
