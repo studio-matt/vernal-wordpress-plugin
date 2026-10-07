@@ -1409,12 +1409,118 @@ class Vernal_API {
             $actions[] = 'wp_update_post_touch:' . $listing_id;
         }
 
+        // Airlift / BlogVault often keep optimized HTML under wp-content. Best-effort wipe.
+        $fs_cleared = $this->purge_airlift_filesystem_caches();
+        if (!empty($fs_cleared)) {
+            $actions = array_merge($actions, $fs_cleared);
+        }
+
+        // Surface callable purge-ish methods so we can tighten invocations next release.
+        $al_methods = array();
+        foreach (array('ALCache', 'ALWPCache', 'ALWPAction', 'ALWPAPI', 'ALCacheHelper') as $cls) {
+            if (!class_exists($cls)) {
+                continue;
+            }
+            try {
+                $ref = new ReflectionClass($cls);
+                foreach ($ref->getMethods(ReflectionMethod::IS_PUBLIC) as $m) {
+                    $n = $m->getName();
+                    if (!preg_match('/purge|clear|flush|invalidate|cache|delete|remove|bust/i', $n)) {
+                        continue;
+                    }
+                    $al_methods[] = $cls . ($m->isStatic() ? '::' : '->') . $n . '(' . $m->getNumberOfRequiredParameters() . ')';
+                }
+            } catch (Throwable $e) {
+                // ignore
+            }
+        }
+
         return array(
             'url' => $url,
             'actions' => array_values(array_unique($actions)),
             'classes_probed' => array_values(array_unique($classes_probed)),
             'urls_purged' => $urls_to_purge,
+            'al_methods' => array_values(array_unique($al_methods)),
         );
+    }
+
+    /**
+     * Delete on-disk Airlift / BlogVault / generic page-cache trees under wp-content.
+     *
+     * @return string[] action labels
+     */
+    private function purge_airlift_filesystem_caches() {
+        $actions = array();
+        if (!defined('WP_CONTENT_DIR')) {
+            return $actions;
+        }
+        $roots = array(
+            WP_CONTENT_DIR . '/cache',
+            WP_CONTENT_DIR . '/airlift',
+            WP_CONTENT_DIR . '/airlift-cache',
+            WP_CONTENT_DIR . '/bv-optimize',
+            WP_CONTENT_DIR . '/bv-cache',
+            WP_CONTENT_DIR . '/blogvault',
+        );
+        foreach ($roots as $root) {
+            if (!is_dir($root)) {
+                continue;
+            }
+            $removed = $this->rrmdir_contents($root);
+            if ($removed > 0) {
+                $actions[] = 'fs_clear:' . basename($root) . ':' . $removed;
+            }
+        }
+        // Also clear matching *airlift* / *bv* dirs one level under wp-content/cache.
+        $cache_root = WP_CONTENT_DIR . '/cache';
+        if (is_dir($cache_root)) {
+            foreach (scandir($cache_root) ?: array() as $entry) {
+                if ($entry === '.' || $entry === '..') {
+                    continue;
+                }
+                if (!preg_match('/airlift|al[_-]|blogvault|^bv/i', $entry)) {
+                    continue;
+                }
+                $path = $cache_root . '/' . $entry;
+                if (is_dir($path)) {
+                    $removed = $this->rrmdir_contents($path);
+                    if ($removed > 0) {
+                        $actions[] = 'fs_clear:cache/' . $entry . ':' . $removed;
+                    }
+                }
+            }
+        }
+        return $actions;
+    }
+
+    /**
+     * Remove files/dirs inside $dir without deleting $dir itself.
+     *
+     * @param string $dir
+     * @return int number of entries removed
+     */
+    private function rrmdir_contents($dir) {
+        $count = 0;
+        if (!is_dir($dir) || !is_writable($dir)) {
+            return 0;
+        }
+        foreach (scandir($dir) ?: array() as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+            $path = $dir . '/' . $entry;
+            if (is_dir($path) && !is_link($path)) {
+                $count += $this->rrmdir_contents($path);
+                if (@rmdir($path)) {
+                    $count++;
+                }
+            } else {
+                if (@unlink($path)) {
+                    $count++;
+                }
+            }
+        }
+        return $count;
     }
 
     /**

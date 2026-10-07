@@ -128,3 +128,45 @@ jobs:
           }
           echo "✓ Deployment verified"
 
+      # Addon domains / sibling WP installs on the same cPanel account often keep a
+      # separate copy of the plugin (e.g. irreverenthealth.com). Sync every match.
+      - name: Deploy to sibling vernal-contentum installs
+        run: |
+          set -euo pipefail
+          HOST="${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}"
+          PRIMARY="${{ secrets.SERVER_PATH }}"
+          echo "Discovering sibling plugin installs under home..."
+          mapfile -t PATHS < <(ssh "$HOST" "find \"\$HOME\" -type f -path '*/wp-content/plugins/vernal-contentum/vernal-contentum.php' 2>/dev/null | sed 's#/vernal-contentum.php\$##' | sort -u")
+          if [ "${#PATHS[@]}" -eq 0 ]; then
+            echo "No sibling installs found (find returned empty)."
+            exit 0
+          fi
+          for DEST in "${PATHS[@]}"; do
+            # Normalize trailing slash for compare
+            DEST_N="${DEST%/}"
+            PRIM_N="${PRIMARY%/}"
+            if [ "$DEST_N" = "$PRIM_N" ]; then
+              echo "Skip primary: $DEST_N"
+              continue
+            fi
+            echo "Deploying sibling: $DEST_N"
+            rsync -avz --delete \
+              --exclude='.git' \
+              --exclude='.git/**' \
+              --exclude='.github' \
+              --exclude='.gitignore' \
+              --exclude='README.md' \
+              --exclude='DEPLOYMENT.md' \
+              --exclude='VERSIONING.md' \
+              --exclude='TROUBLESHOOTING.md' \
+              --exclude='UPDATE_SYSTEM.md' \
+              --exclude='SECRETS_SETUP.md' \
+              --exclude='.DS_Store' \
+              ./ "$HOST:$DEST_N/" || {
+                echo "::error::rsync to sibling failed: $DEST_N"
+                exit 1
+              }
+            VER=$(ssh "$HOST" "grep -E '^ \\* Version:' \"$DEST_N/vernal-contentum.php\" | head -1")
+            echo "✓ Sibling deployed: $DEST_N ($VER)"
+          done
+          echo "✓ Sibling deploys complete"
