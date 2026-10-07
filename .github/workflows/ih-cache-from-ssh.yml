@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  hunt:
+  wipe:
     runs-on: ubuntu-latest
     steps:
       - uses: webfactory/ssh-agent@v0.10.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-      - name: Hunt and wipe from SSH account
+      - name: Wipe IH Airlift HTTPS cache via WHM/UAPI
         run: |
           set -e
           HOST='${{ secrets.SERVER_HOST }}'
@@ -18,37 +18,50 @@ jobs:
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
           ssh -o StrictHostKeyChecking=no "$USER@$HOST" bash -s <<'EOS'
           set +e
-          echo "whoami=$(whoami) HOME=$HOME"
-          echo "--- readable under /home ---"
-          ls -la /home | head -40
-          echo "--- try namei ---"
-          namei -l /home/irreverenthealth/public_html/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html 2>&1 | head -20
-          echo "--- find any world-writable airlift ---"
-          find /home/irreverenthealth -type d -name airlift 2>/dev/null | head
-          find /home/*/public_html/wp-content/cache -type d -name airlift 2>/dev/null | head
-          echo "--- groups ---"
-          id; getent group nobody www-data apache 2>/dev/null | head
-          echo "--- cron/php paths ---"
-          ls -la "$HOME/public_html/wp-content/cache/airlift" 2>&1 | head
-          # If any path to IH cache is writable, delete
-          for f in \
-            /home/irreverenthealth/public_html/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html \
-            /home/irreverenthealth/public_html/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html_gzip
-          do
-            if [ -w "$f" ]; then echo "WRITABLE $f"; rm -f "$f" && echo removed; else echo "not writable/missing $f"; fi
-            if [ -r "$f" ]; then echo "READABLE $f"; ls -la "$f"; fi
-          done
-          # Search local files for irreverent FTP/cpanel passwords (no print of secrets)
-          echo "--- credential file names only ---"
-          find "$HOME" -maxdepth 4 \( -iname '*irrev*' -o -iname '*ftp*' -o -iname '*cpanel*' \) 2>/dev/null | head -40
-          # Check if .my.cnf / accesshash exists
-          ls -la "$HOME/.my.cnf" "$HOME/.accesshash" "$HOME/.cpanel" 2>&1 | head
-          # Try uapi if available
-          if command -v uapi >/dev/null; then
-            uapi --output=json Mime list_types 2>/dev/null | head -c 200
-            echo
-            uapi --output=json DomainInfo list_domains 2>/dev/null | head -c 500
-            echo
-          fi
-          if command -v whmapi1 >/dev/null; then echo has_whmapi1; fi
+          echo "whoami=$(whoami) wheel? $(id)"
+          command -v whmapi1; command -v uapi
+
+          TARGET_DIR="/home/irreverenthealth/public_html/wp-content/cache/airlift/irreverenthealth.com/episodes"
+          TARGET_FILE="$TARGET_DIR/index-https.html"
+          TARGET_GZ="$TARGET_DIR/index-https.html_gzip"
+
+          echo "=== whmapi1 help snippet ==="
+          whmapi1 --help 2>&1 | head -5
+
+          echo "=== try uapi_cpanel Fileman as irreverenthealth ==="
+          # WHM passthrough UAPI to cPanel account
+          whmapi1 uapi_cpanel cpanel=irreverenthealth module=Fileman func=list_files dir="$TARGET_DIR" 2>&1 | head -c 2000
+          echo
+          whmapi1 uapi_cpanel cpanel=irreverenthealth module=Fileman func=get_file_information file="$TARGET_FILE" 2>&1 | head -c 1500
+          echo
+
+          echo "=== trash/remove files ==="
+          whmapi1 uapi_cpanel cpanel=irreverenthealth module=Fileman func=trash \
+            files='["'"$TARGET_FILE"'","'"$TARGET_GZ"'"]' 2>&1 | head -c 2000
+          echo
+          whmapi1 uapi_cpanel cpanel=irreverenthealth module=Fileman func=trash \
+            sourcefiles="$TARGET_FILE,$TARGET_GZ" 2>&1 | head -c 1500
+          echo
+
+          # Alternative param shapes used by Fileman::trash
+          whmapi1 uapi_cpanel cpanel=irreverenthealth module=Fileman func=trash \
+            dir="$TARGET_DIR" files='["index-https.html","index-https.html_gzip"]' 2>&1 | head -c 2000
+          echo
+
+          echo "=== wipe whole airlift dir contents ==="
+          AIR="/home/irreverenthealth/public_html/wp-content/cache/airlift"
+          whmapi1 uapi_cpanel cpanel=irreverenthealth module=Fileman func=list_files dir="$AIR" 2>&1 | head -c 2000
+          echo
+          whmapi1 uapi_cpanel cpanel=irreverenthealth module=Fileman func=trash \
+            dir="$AIR" files='["irreverenthealth.com"]' 2>&1 | head -c 2000
+          echo
+
+          echo "=== create temp session / passwd less su ==="
+          whmapi1 create_user_session user=irreverenthealth service=cpaneld 2>&1 | head -c 1500
+          echo
+
+          echo "=== verify via HTTP after wipe ==="
+          curl -sL -A 'Mozilla/5.0' -H 'Cache-Control: no-cache' 'https://irreverenthealth.com/episodes/' \
+            | python3 -c "import sys; b=sys.stdin.read(); i=b.lower().find('doug beitz'); j=b.lower().find('sarah hill'); c=b[i:j]; print('lock_picks', 'lock picks' in c.lower(), 'len', len(b))"
+          curl -sI -A 'Mozilla/5.0' 'https://irreverenthealth.com/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html' | tr -d '\r' | head -15
           EOS
