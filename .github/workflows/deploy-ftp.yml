@@ -1,8 +1,5 @@
 name: Deploy to Server (FTP)
 
-# GitHub-hosted runners cannot open FTP data ports to this host (PASV refused,
-# active mode blocked). Control-channel commands (CWD/DELE/RMD/MKD) still work,
-# which is enough to delete stuck Airlift HTTPS page-cache files.
 on:
   workflow_dispatch:
 
@@ -10,134 +7,54 @@ jobs:
   wipe-airlift-cache:
     runs-on: ubuntu-latest
     steps:
-      - name: Verify secrets
-        run: |
-          if [ -z "${{ secrets.SERVER }}" ] || [ -z "${{ secrets.USERNAME }}" ] || [ -z "${{ secrets.PASSWORD }}" ]; then
-            echo "::error::SERVER/USERNAME/PASSWORD secrets required"
-            exit 1
-          fi
-          echo "Server: ${{ secrets.SERVER }}"
-          echo "Username: ${{ secrets.USERNAME }}"
-
-      - name: Delete Airlift HTTPS cache via FTP control channel
+      - name: FTP control-channel probe + wipe
         env:
           FTP_HOST: ${{ secrets.SERVER }}
           FTP_USER: ${{ secrets.USERNAME }}
           FTP_PASS: ${{ secrets.PASSWORD }}
         run: |
           python3 <<'PY'
-          import ftplib, os, sys
-
-          host = os.environ["FTP_HOST"].strip()
-          user = os.environ["FTP_USER"].strip()
-          password = os.environ["FTP_PASS"]
-
-          ftp = ftplib.FTP()
-          ftp.connect(host, 21, timeout=60)
-          ftp.login(user, password)
-          ftp.set_pasv(True)
-          print("login ok user=", user, "pwd=", ftp.pwd())
-
-          # Control-channel only helpers (no LIST/RETR/STOR).
-          def try_cwd(path):
-              try:
-                  ftp.cwd(path)
-                  print("cwd ok", path, "->", ftp.pwd())
-                  return True
-              except Exception as e:
-                  print("cwd fail", path, type(e).__name__, e)
-                  return False
-
-          def try_dele(path):
-              try:
-                  ftp.delete(path)
-                  print("deleted", path)
-                  return True
-              except Exception as e:
-                  print("dele fail", path, type(e).__name__, e)
-                  return False
-
-          def try_rmd(path):
-              try:
-                  ftp.rmd(path)
-                  print("rmd", path)
-                  return True
-              except Exception as e:
-                  print("rmd fail", path, type(e).__name__, e)
-                  return False
-
-          # Reset to login root between probes.
-          def reset():
-              try:
-                  ftp.cwd("/")
-              except Exception:
-                  pass
-
-          roots = [
-              "",
-              "public_html",
-              "www",
-              "domains/irreverenthealth.com/public_html",
-              "irreverenthealth.com/public_html",
-              "irreverenthealth.com",
+          import ftplib, os
+          host=os.environ["FTP_HOST"].strip(); user=os.environ["FTP_USER"].strip(); password=os.environ["FTP_PASS"]
+          ftp=ftplib.FTP(); ftp.connect(host,21,timeout=60); ftp.login(user,password)
+          print("USER=", user)
+          print("PWD=", ftp.pwd())
+          # Try STAT for listing without data connection
+          for cmd in ("STAT", "STAT .", "STAT /", "SITE HELP", "FEAT"):
+            try:
+              print(cmd, "=>", ftp.sendcmd(cmd)[:500])
+            except Exception as e:
+              print(cmd, "ERR", e)
+          probes=[
+            "public_html","www","mail","etc","tmp","includes","lib","assets","tests",
+            "vernal-contentum.php","wp-content","wp-admin","wp-includes",
+            "cache","airlift","domains","irreverenthealth.com",
+            "home","home/irreverenthealth","home/irreverenthealth/public_html",
+            "../public_html","../../public_html",
+            "public_html/wp-content","public_html/wp-content/cache",
+            "public_html/wp-content/cache/airlift",
+            "public_html/wp-content/plugins/vernal-contentum",
+            "public_html/wp-content/plugins/vernal-contentum/vernal-contentum.php",
           ]
-
-          targets = [
-              "wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html",
-              "wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html_gzip",
-              "wp-content/cache/airlift/irreverenthealth.com/index-https.html",
-              "wp-content/cache/airlift/irreverenthealth.com/index-https.html_gzip",
-              "wp-content/cache/airlift/irreverenthealth.com/episodes/index.html",
-              "wp-content/cache/airlift/irreverenthealth.com/episodes/index.html_gzip",
-          ]
-
-          deleted = 0
-          for root in roots:
-              reset()
-              if root and not try_cwd(root):
-                  continue
-              base = ftp.pwd()
-              for rel in targets:
-                  # Absolute-from-current delete
-                  if try_dele(rel):
-                      deleted += 1
-                      continue
-                  # Walk cwd then delete basename
-                  reset()
-                  if root and not try_cwd(root):
-                      continue
-                  parts = rel.split("/")
-                  ok = True
-                  for p in parts[:-1]:
-                      if not try_cwd(p):
-                          ok = False
-                          break
-                  if ok and try_dele(parts[-1]):
-                      deleted += 1
-
-          # Best-effort: remove episodes cache directory if empty after deletes.
-          for root in roots:
-              reset()
-              if root and not try_cwd(root):
-                  continue
-              if try_cwd("wp-content/cache/airlift/irreverenthealth.com/episodes"):
-                  # try remove gzip leftovers / common variants
-                  for name in (
-                      "index-https.html",
-                      "index-https.html_gzip",
-                      "index.html",
-                      "index.html_gzip",
-                      "index-https.html.br",
-                      "index.html.br",
-                  ):
-                      if try_dele(name):
-                          deleted += 1
-                  try_rmd(".")  # usually fails if not empty / not allowed
-
-          print("deleted_count=", deleted)
-          if deleted == 0:
-              print("::warning::No cache files deleted — FTP account may not own irreverenthealth paths")
-              # Still succeed if login worked; caller verifies HTTP.
+          def cwd(p):
+            try:
+              ftp.cwd(p); print("CWD OK", p, "now", ftp.pwd()); return True
+            except Exception as e:
+              print("CWD NO", p, e); return False
+          for p in probes:
+            try: ftp.cwd("/")
+            except Exception: pass
+            cwd(p)
+          # SIZE command (control channel) for known files
+          for f in [
+            "vernal-contentum.php",
+            "includes/class-vernal-api.php",
+            "public_html/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html",
+            "wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html",
+          ]:
+            try:
+              print("SIZE", f, ftp.size(f))
+            except Exception as e:
+              print("SIZE NO", f, e)
           ftp.quit()
-          print("FTP control-channel wipe finished")
           PY
