@@ -186,6 +186,13 @@ class Vernal_API {
             ),
         ));
 
+        // Force-install latest GitHub release (used when SSH deploy cannot reach this site).
+        register_rest_route($namespace, '/self-update', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'self_update_from_github'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+
         // Purge page caches (Airlift / Elementor / Rocket / LiteSpeed / etc.) for a post URL
         register_rest_route($namespace, '/posts/(?P<id>\d+)/purge-caches', array(
             'methods' => 'POST',
@@ -1174,6 +1181,109 @@ class Vernal_API {
                 'url' => get_permalink($post_id),
                 'cache_purge' => $cache_purge,
                 'plugin_version' => defined('VERNAL_CONTENTUM_VERSION') ? VERNAL_CONTENTUM_VERSION : null,
+            ),
+        ));
+    }
+
+    /**
+     * REST: download latest GitHub release zip and overwrite this plugin in place.
+     * Needed for sites that are not on the SSH deploy host (e.g. Irreverent Health).
+     */
+    public function self_update_from_github($request) {
+        if (!current_user_can('manage_options') && !$this->check_api_key($request)) {
+            return new WP_Error('forbidden', __('Forbidden', 'vernal-contentum'), array('status' => 403));
+        }
+
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+        require_once ABSPATH . 'wp-admin/includes/misc.php';
+        require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+
+        $tag = sanitize_text_field((string) $request->get_param('tag'));
+        if ($tag === '') {
+            $tag = 'latest';
+        }
+
+        $api_url = ($tag === 'latest')
+            ? 'https://api.github.com/repos/studio-matt/vernal-wordpress-plugin/releases/latest'
+            : 'https://api.github.com/repos/studio-matt/vernal-wordpress-plugin/releases/tags/' . rawurlencode($tag);
+
+        $response = wp_remote_get($api_url, array(
+            'timeout' => 45,
+            'headers' => array('Accept' => 'application/vnd.github+json', 'User-Agent' => 'vernal-contentum-self-update'),
+        ));
+        if (is_wp_error($response)) {
+            return $response;
+        }
+        $code = wp_remote_retrieve_response_code($response);
+        $payload = json_decode(wp_remote_retrieve_body($response), true);
+        if ($code >= 400 || !is_array($payload)) {
+            return new WP_Error('github_release', __('Could not load GitHub release metadata', 'vernal-contentum'), array('status' => 502));
+        }
+
+        $zip_url = '';
+        foreach (($payload['assets'] ?? array()) as $asset) {
+            $name = (string) ($asset['name'] ?? '');
+            if (preg_match('/\.zip$/i', $name)) {
+                $zip_url = (string) ($asset['browser_download_url'] ?? '');
+                break;
+            }
+        }
+        if ($zip_url === '') {
+            return new WP_Error('github_asset', __('Release has no zip asset', 'vernal-contentum'), array('status' => 502));
+        }
+
+        $tmp = download_url($zip_url, 120);
+        if (is_wp_error($tmp)) {
+            return $tmp;
+        }
+
+        $skin = new Automatic_Upgrader_Skin();
+        $upgrader = new Plugin_Upgrader($skin);
+        // Package must unpack to plugin slug folder; our release zip is vernal-contentum/.
+        $result = $upgrader->run(array(
+            'package' => $tmp,
+            'destination' => WP_PLUGIN_DIR . '/vernal-contentum',
+            'clear_destination' => true,
+            'clear_working' => true,
+            'hook_extra' => array(
+                'type' => 'plugin',
+                'action' => 'update',
+                'plugin' => 'vernal-contentum/vernal-contentum.php',
+            ),
+        ));
+        @unlink($tmp);
+
+        if (is_wp_error($result)) {
+            return $result;
+        }
+        if ($result === false) {
+            return new WP_Error('upgrade_failed', __('Plugin upgrade failed', 'vernal-contentum'), array('status' => 500));
+        }
+
+        activate_plugin('vernal-contentum/vernal-contentum.php');
+
+        // Clear OPcache so the new version constants load immediately.
+        if (function_exists('opcache_reset')) {
+            @opcache_reset();
+        }
+
+        $new_version = defined('VERNAL_CONTENTUM_VERSION') ? VERNAL_CONTENTUM_VERSION : null;
+        // Re-read from file in case this request still has old constants.
+        $boot = WP_PLUGIN_DIR . '/vernal-contentum/vernal-contentum.php';
+        if (is_readable($boot)) {
+            $raw = file_get_contents($boot);
+            if (preg_match('/^\s*\*\s*Version:\s*([0-9.]+)/m', $raw, $m)) {
+                $new_version = $m[1];
+            }
+        }
+
+        return rest_ensure_response(array(
+            'success' => true,
+            'data' => array(
+                'release_tag' => $payload['tag_name'] ?? $tag,
+                'plugin_version' => $new_version,
+                'zip_url' => $zip_url,
             ),
         ));
     }

@@ -130,22 +130,42 @@ jobs:
 
       # Addon domains / sibling WP installs on the same cPanel account often keep a
       # separate copy of the plugin (e.g. irreverenthealth.com). Sync every match.
+      # Best-effort: never fail the primary deploy if discovery/SSH flakes.
       - name: Deploy to sibling vernal-contentum installs
+        continue-on-error: true
         run: |
-          set -euo pipefail
+          set -uo pipefail
           HOST="${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}"
           PRIMARY="${{ secrets.SERVER_PATH }}"
           echo "Discovering sibling plugin installs..."
-          # Diagnose home + locate every plugin bootstrap (name match is more reliable than -path).
-          ssh "$HOST" 'echo "whoami=$(whoami) HOME=$HOME pwd=$(pwd)"; ls -la "$HOME" 2>/dev/null | head -30; ls -la "$HOME/public_html" 2>/dev/null | head -20; ls -la "$HOME/domains" 2>/dev/null | head -20'
-          mapfile -t PATHS < <(ssh "$HOST" 'set +e
+          ssh_retry() {
+            local n=0
+            until ssh -o ConnectTimeout=15 -o ServerAliveInterval=5 "$HOST" "$@"; do
+              n=$((n+1))
+              if [ "$n" -ge 4 ]; then
+                return 1
+              fi
+              echo "ssh retry $n..."
+              sleep $((n*3))
+            done
+          }
+          ssh_retry 'echo "whoami=$(whoami) HOME=$HOME"; ls -la "$HOME" 2>/dev/null | head -40; ls -la "$HOME/public_html" 2>/dev/null | head -30; ls -la "$HOME/domains" 2>/dev/null | head -30; ls /home 2>/dev/null | head -40; echo "--- airlift caches ---"; find "$HOME" -type d -path "*/cache/airlift" 2>/dev/null | head -20' || {
+            echo "::warning::SSH diagnose failed; skipping siblings"
+            exit 0
+          }
+          # Always wipe Airlift page-cache trees we can see (listing freezes live HTML).
+          ssh_retry 'set +e
+            find "$HOME" -type d -path "*/cache/airlift" 2>/dev/null | while read -r d; do
+              echo "Clearing $d"
+              rm -rf "$d"/* "$d"/.[!.]* 2>/dev/null
+              echo "cleared:$d"
+            done
+          ' || echo "::warning::Airlift cache clear skipped"
+          mapfile -t PATHS < <(ssh_retry 'set +e
             WHO=$(whoami)
-            ROOTS="$HOME /home/$WHO $HOME/public_html $HOME/irreverenthealth.com $HOME/domains $HOME/domains/irreverenthealth.com/public_html $HOME/public_html/irreverenthealth.com /home/$WHO/irreverenthealth.com /home/$WHO/domains"
-            for root in $ROOTS; do
-              [ -d "$root" ] || continue
-              find "$root" -xdev -type f -name vernal-contentum.php 2>/dev/null
-            done | sed "s#/vernal-contentum.php\$##" | sort -u
-          ')
+            find "$HOME" /home/"$WHO" /home -xdev -type f -name vernal-contentum.php 2>/dev/null \
+              | sed "s#/vernal-contentum.php\$##" | sort -u
+          ' || true)
           echo "Found ${#PATHS[@]} install(s):"
           printf '  %s\n' "${PATHS[@]:-}"
           if [ "${#PATHS[@]}" -eq 0 ]; then
@@ -173,10 +193,10 @@ jobs:
               --exclude='SECRETS_SETUP.md' \
               --exclude='.DS_Store' \
               ./ "$HOST:$DEST_N/" || {
-                echo "::error::rsync to sibling failed: $DEST_N"
-                exit 1
+                echo "::warning::rsync to sibling failed: $DEST_N"
+                continue
               }
-            VER=$(ssh "$HOST" "grep -E '^ \\* Version:' \"$DEST_N/vernal-contentum.php\" | head -1")
-            echo "✓ Sibling deployed: $DEST_N ($VER)"
+            VER=$(ssh "$HOST" "grep -E '^ \\* Version:' \"$DEST_N/vernal-contentum.php\" | head -1" || true)
+            echo "Sibling deployed: $DEST_N ($VER)"
           done
-          echo "✓ Sibling deploys complete"
+          echo "Sibling deploys complete"
