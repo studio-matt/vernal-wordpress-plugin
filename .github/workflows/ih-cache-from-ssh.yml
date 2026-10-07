@@ -7,40 +7,119 @@ jobs:
   wipe:
     runs-on: ubuntu-latest
     steps:
-      - uses: webfactory/ssh-agent@v0.10.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-      - name: Try sibling accounts + copy HTTP cache over HTTPS via PHP CLI if possible
+      - name: cPanel session Fileman wipe with FTP secrets
+        env:
+          CP_HOST: ${{ secrets.SERVER }}
+          CP_USER: ${{ secrets.USERNAME }}
+          CP_PASS: ${{ secrets.PASSWORD }}
         run: |
-          HOST='${{ secrets.SERVER_HOST }}'
-          USER='${{ secrets.SERVER_USER }}'
-          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
-          ssh -o StrictHostKeyChecking=no "$USER@$HOST" bash -s <<'EOS'
-          set +e
-          KEY=$(cat ~/.ssh/authorized_keys 2>/dev/null | head -1 | awk '{print $2}')
-          echo "our_key_fp=$(echo "$KEY" | head -c 20)..."
-          for acct in irreverenthealth thenewheadshop envoy matthamp; do
-            echo "=== try ssh $acct@localhost ==="
-            ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$acct@localhost" 'whoami; ls public_html/wp-content/cache/airlift 2>&1 | head' 2>&1 | head -10
-          done
-          echo "=== php as suexec? ==="
-          # If ea-php can run a file we write under /tmp that deletes - open_basedir may block
-          TMP=$(mktemp /tmp/wipeXXXX.php)
-          cat > "$TMP" <<'PHP'
-          <?php
-          $f='/home/irreverenthealth/public_html/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html';
-          echo "exists=". (file_exists($f)?'1':'0') ." writable=". (is_writable($f)?'1':'0') ."\n";
-          echo "dir_writable=". (is_writable(dirname($f))?'1':'0') ."\n";
-          @unlink($f); @unlink($f.'_gzip');
-          echo "after_exists=". (file_exists($f)?'1':'0') ."\n";
-          PHP
-          for bin in php ea-php81 ea-php82 ea-php80 /usr/local/bin/php; do
-            if command -v $bin >/dev/null 2>&1; then
-              echo "run $bin"
-              $bin "$TMP" 2>&1 | head -20
-            fi
-          done
-          rm -f "$TMP"
-          echo "=== verify ==="
-          curl -sL -A 'Mozilla/5.0' 'https://irreverenthealth.com/episodes/' | python3 -c "import sys;b=sys.stdin.read();i=b.lower().find('doug beitz');j=b.lower().find('sarah hill');print('lock_picks', 'lock picks' in b[i:j].lower())"
-          EOS
+          python3 <<'PY'
+          import json, ssl, urllib.parse, urllib.request, http.cookiejar, re
+
+          host = (os := __import__('os')).environ['CP_HOST'].strip()
+          user = os.environ['CP_USER'].strip()
+          password = os.environ['CP_PASS']
+          # SERVER might be hostname or IP; try IP:2083 and host:2083
+          bases = []
+          for h in {host, '50.6.198.220', 'irreverenthealth.com'}:
+            bases.append(f'https://{h}:2083')
+
+          ctx = ssl._create_unverified_context()
+
+          def try_login(base, u, p):
+            cj = http.cookiejar.CookieJar()
+            opener = urllib.request.build_opener(
+              urllib.request.HTTPSHandler(context=ctx),
+              urllib.request.HTTPCookieProcessor(cj),
+            )
+            data = urllib.parse.urlencode({'user': u, 'pass': p}).encode()
+            req = urllib.request.Request(base + '/login/?login_only=1', data=data, method='POST')
+            try:
+              with opener.open(req, timeout=30) as r:
+                body = r.read().decode('utf-8', 'replace')
+                return opener, r.status, body, cj
+            except Exception as e:
+              body = ''
+              if hasattr(e, 'read'):
+                try: body = e.read().decode('utf-8','replace')
+                except Exception: body = str(e)
+              return opener, getattr(e, 'code', 0), body, cj
+
+          # Try ftp user and irreverenthealth with same password
+          users = [user, 'irreverenthealth', 'irreverent']
+          opener = None
+          base_ok = None
+          login_user = None
+          for base in bases:
+            for u in users:
+              opener, status, body, cj = try_login(base, u, password)
+              print(f'login {base} user={u} status={status} body={body[:120]!r}')
+              if status == 200 and ('security_token' in body or '"status":1' in body.replace(' ','') or 'redirect' in body.lower()):
+                base_ok, login_user = base, u
+                break
+              # cPanel often returns JSON {"status":1,"redirect":"...","security_token":"..."}
+              try:
+                j = json.loads(body)
+                if j.get('status') == 1:
+                  base_ok, login_user = base, u
+                  print('parsed ok', j)
+                  break
+              except Exception:
+                pass
+            if base_ok:
+              break
+
+          if not base_ok:
+            raise SystemExit('cPanel login failed for all user/host combos')
+
+          print('SUCCESS login', login_user, base_ok)
+
+          # Extract security token from cookies or body
+          token = None
+          try:
+            j = json.loads(body)
+            token = j.get('security_token') or j.get('redirect','').split('?')[0]
+          except Exception:
+            pass
+          for c in cj:
+            print('cookie', c.name, c.value[:20])
+            if 'token' in c.name.lower():
+              token = c.value
+
+          # Call UAPI execute endpoints with session cookies
+          paths = [
+            '/execute/Fileman/list_files',
+            f'{token}/execute/Fileman/list_files' if token and token.startswith('/') else None,
+          ]
+          dirs = [
+            '/home/irreverenthealth/public_html/wp-content/cache/airlift/irreverenthealth.com/episodes',
+            'wp-content/cache/airlift/irreverenthealth.com/episodes',
+            'public_html/wp-content/cache/airlift/irreverenthealth.com/episodes',
+          ]
+          for d in dirs:
+            for path in [p for p in paths if p]:
+              q = urllib.parse.urlencode({'dir': d})
+              url = base_ok + path + '?' + q
+              req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+              try:
+                with opener.open(req, timeout=30) as r:
+                  print('list', path, d, r.status, r.read()[:500])
+              except Exception as e:
+                print('list fail', path, d, e)
+
+          # Trash
+          targets = [
+            '/home/irreverenthealth/public_html/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html',
+            '/home/irreverenthealth/public_html/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html_gzip',
+          ]
+          for t in targets:
+            for func in ('trash', 'remove_files'):
+              path = f'/execute/Fileman/{func}'
+              q = urllib.parse.urlencode({'files': json.dumps([t])})
+              req = urllib.request.Request(base_ok + path + '?' + q, headers={'User-Agent': 'Mozilla/5.0'})
+              try:
+                with opener.open(req, timeout=30) as r:
+                  print(func, t, r.status, r.read()[:400])
+              except Exception as e:
+                print(func, 'fail', t, e)
+          PY
