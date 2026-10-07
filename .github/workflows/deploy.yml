@@ -149,24 +149,57 @@ jobs:
               echo "not-writable:$d"
             fi
           done
-          # Direct known Irreverent cache object (same box, Host-routed)
+          # Irreverent Health is a sibling cPanel account on this host (execute-bit traversal).
+          IH_ROOT="/home/irreverenthealth/public_html"
+          echo "--- irreverenthealth probe ---"
+          ls -la "$IH_ROOT" 2>&1 | head -20
+          ls -la "$IH_ROOT/wp-content/plugins" 2>&1 | head -30
+          ls -la "$IH_ROOT/wp-content/cache/airlift/irreverenthealth.com/episodes" 2>&1 | head -20
           for f in \
-            /home/*/public_html/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html \
-            /home/*/irreverenthealth.com/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html \
-            /home/*/domains/irreverenthealth.com/public_html/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html
+            "$IH_ROOT/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html" \
+            "$IH_ROOT/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html_gzip" \
+            "$IH_ROOT/wp-content/cache/airlift/irreverenthealth.com/index-https.html"
           do
-            for match in $f; do
-              if [ -f "$match" ]; then
-                echo "Removing $match"
-                rm -f "$match" "$match"_gzip 2>/dev/null
-                echo "removed:$match"
-              fi
-            done
+            if [ -e "$f" ]; then
+              echo "Removing $f"
+              rm -f "$f" && echo "removed:$f" || echo "rm-failed:$f"
+            else
+              echo "missing:$f"
+            fi
           done
+          # Wipe whole Irreverent Airlift tree if writable
+          if [ -d "$IH_ROOT/wp-content/cache/airlift" ]; then
+            echo "Wiping $IH_ROOT/wp-content/cache/airlift"
+            rm -rf "$IH_ROOT/wp-content/cache/airlift"/* && echo "wiped-airlift" || echo "wipe-failed"
+          fi
           echo "--- sibling plugins ---"
-          find "$HOME" /home -type f -name vernal-contentum.php 2>/dev/null | sed 's#/vernal-contentum.php$##' | sort -u | head -20
+          find "$HOME" /home/irreverenthealth -type f -name vernal-contentum.php 2>/dev/null | sed 's#/vernal-contentum.php$##' | sort -u | head -20
           EOS
           echo "✓ Deployment verified"
+
+      - name: Deploy plugin into irreverenthealth account
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          HOST="${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}"
+          DEST="/home/irreverenthealth/public_html/wp-content/plugins/vernal-contentum"
+          echo "Deploying to $DEST"
+          # Ensure destination exists (may fail if not writable)
+          ssh "$HOST" "mkdir -p '$DEST' && test -w '$DEST'" || {
+            echo "::warning::Cannot write $DEST"
+            exit 0
+          }
+          rsync -avz --delete \
+            --exclude='.git' --exclude='.git/**' --exclude='.github' \
+            --exclude='.gitignore' --exclude='README.md' --exclude='DEPLOYMENT.md' \
+            --exclude='VERSIONING.md' --exclude='TROUBLESHOOTING.md' \
+            --exclude='UPDATE_SYSTEM.md' --exclude='SECRETS_SETUP.md' --exclude='.DS_Store' \
+            ./ "$HOST:$DEST/" || {
+              echo "::warning::rsync to irreverenthealth failed"
+              exit 0
+            }
+          ssh "$HOST" "grep -E '^ \\* Version:' '$DEST/vernal-contentum.php' | head -1; rm -rf /home/irreverenthealth/public_html/wp-content/cache/airlift/* 2>/dev/null; echo done"
+          echo "✓ irreverenthealth plugin deploy attempted"
 
       # Addon domains / sibling WP installs on the same cPanel account often keep a
       # separate copy of the plugin (e.g. irreverenthealth.com). Sync every match.
