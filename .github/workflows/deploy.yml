@@ -131,14 +131,40 @@ jobs:
           ls -la "$HOME" | head -40
           ls -la "$HOME/public_html" 2>/dev/null | head -30
           ls -la "$HOME/domains" 2>/dev/null | head -30
-          echo "--- airlift caches ---"
+          echo "--- /home accounts ---"
+          ls -la /home 2>/dev/null | head -60
+          echo "--- airlift caches (home) ---"
           find "$HOME" -type d -path '*/cache/airlift' 2>/dev/null | while read -r d; do
             echo "Clearing $d"
             rm -rf "$d"/* "$d"/.[!.]* 2>/dev/null
             echo "cleared:$d"
           done
+          echo "--- airlift caches (server-wide readable) ---"
+          find /home -type d -path '*/cache/airlift' 2>/dev/null | while read -r d; do
+            echo "Found $d"
+            if [ -w "$d" ]; then
+              rm -rf "$d"/* "$d"/.[!.]* 2>/dev/null
+              echo "cleared:$d"
+            else
+              echo "not-writable:$d"
+            fi
+          done
+          # Direct known Irreverent cache object (same box, Host-routed)
+          for f in \
+            /home/*/public_html/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html \
+            /home/*/irreverenthealth.com/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html \
+            /home/*/domains/irreverenthealth.com/public_html/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html
+          do
+            for match in $f; do
+              if [ -f "$match" ]; then
+                echo "Removing $match"
+                rm -f "$match" "$match"_gzip 2>/dev/null
+                echo "removed:$match"
+              fi
+            done
+          done
           echo "--- sibling plugins ---"
-          find "$HOME" -type f -name vernal-contentum.php 2>/dev/null | sed 's#/vernal-contentum.php$##' | sort -u
+          find "$HOME" /home -type f -name vernal-contentum.php 2>/dev/null | sed 's#/vernal-contentum.php$##' | sort -u | head -20
           EOS
           echo "✓ Deployment verified"
 
