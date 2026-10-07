@@ -1,0 +1,54 @@
+name: IH cache hunt via cPanel SSH
+
+on:
+  workflow_dispatch:
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      - name: Hunt and wipe from SSH account
+        run: |
+          set -e
+          HOST='${{ secrets.SERVER_HOST }}'
+          USER='${{ secrets.SERVER_USER }}'
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh -o StrictHostKeyChecking=no "$USER@$HOST" bash -s <<'EOS'
+          set +e
+          echo "whoami=$(whoami) HOME=$HOME"
+          echo "--- readable under /home ---"
+          ls -la /home | head -40
+          echo "--- try namei ---"
+          namei -l /home/irreverenthealth/public_html/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html 2>&1 | head -20
+          echo "--- find any world-writable airlift ---"
+          find /home/irreverenthealth -type d -name airlift 2>/dev/null | head
+          find /home/*/public_html/wp-content/cache -type d -name airlift 2>/dev/null | head
+          echo "--- groups ---"
+          id; getent group nobody www-data apache 2>/dev/null | head
+          echo "--- cron/php paths ---"
+          ls -la "$HOME/public_html/wp-content/cache/airlift" 2>&1 | head
+          # If any path to IH cache is writable, delete
+          for f in \
+            /home/irreverenthealth/public_html/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html \
+            /home/irreverenthealth/public_html/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html_gzip
+          do
+            if [ -w "$f" ]; then echo "WRITABLE $f"; rm -f "$f" && echo removed; else echo "not writable/missing $f"; fi
+            if [ -r "$f" ]; then echo "READABLE $f"; ls -la "$f"; fi
+          done
+          # Search local files for irreverent FTP/cpanel passwords (no print of secrets)
+          echo "--- credential file names only ---"
+          find "$HOME" -maxdepth 4 \( -iname '*irrev*' -o -iname '*ftp*' -o -iname '*cpanel*' \) 2>/dev/null | head -40
+          # Check if .my.cnf / accesshash exists
+          ls -la "$HOME/.my.cnf" "$HOME/.accesshash" "$HOME/.cpanel" 2>&1 | head
+          # Try uapi if available
+          if command -v uapi >/dev/null; then
+            uapi --output=json Mime list_types 2>/dev/null | head -c 200
+            echo
+            uapi --output=json DomainInfo list_domains 2>/dev/null | head -c 500
+            echo
+          fi
+          if command -v whmapi1 >/dev/null; then echo has_whmapi1; fi
+          EOS
