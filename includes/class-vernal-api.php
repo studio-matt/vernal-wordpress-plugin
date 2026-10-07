@@ -1322,12 +1322,73 @@ class Vernal_API {
             }
         }
 
-        // Record which AL*/BV* classes are loaded (helps diagnose Airlift purge gaps).
+        // Airlift method names drift — reflect any public purge/clear/flush on AL*/BV* classes.
+        $urls_to_purge = array_values(array_unique(array_filter(array(
+            $url,
+            home_url('/'),
+            home_url('/episodes/'),
+            get_permalink($post_id),
+        ))));
         foreach (get_declared_classes() as $class) {
-            if (preg_match('/^(AL|Airlift|BV|BlogVault)/i', $class)) {
-                $classes_probed[] = $class;
+            if (!preg_match('/^(AL|Airlift|BV|BlogVault)/i', $class)) {
+                continue;
+            }
+            $classes_probed[] = $class;
+            try {
+                $ref_class = new ReflectionClass($class);
+            } catch (Throwable $e) {
+                continue;
+            }
+            foreach ($ref_class->getMethods(ReflectionMethod::IS_PUBLIC) as $ref) {
+                $name = $ref->getName();
+                if (!preg_match('/purge|clear|flush|invalidate|bust|delete.*cache|clean.*cache/i', $name)) {
+                    continue;
+                }
+                if ($ref->isAbstract() || $ref->isConstructor() || $ref->isDestructor()) {
+                    continue;
+                }
+                try {
+                    $argc = $ref->getNumberOfRequiredParameters();
+                    if ($ref->isStatic()) {
+                        if ($argc === 0) {
+                            $ref->invoke(null);
+                            $actions[] = $class . '::' . $name . '()';
+                        } elseif ($argc === 1) {
+                            foreach ($urls_to_purge as $u) {
+                                $ref->invoke(null, $u);
+                            }
+                            $actions[] = $class . '::' . $name . '(url*)';
+                        }
+                    } elseif (!$ref->isStatic() && $ref_class->isInstantiable() && $argc <= 1) {
+                        $obj = $ref_class->newInstanceArgs(array());
+                        if ($argc === 0) {
+                            $ref->invoke($obj);
+                            $actions[] = $class . '->' . $name . '()';
+                        } else {
+                            foreach ($urls_to_purge as $u) {
+                                $ref->invoke($obj, $u);
+                            }
+                            $actions[] = $class . '->' . $name . '(url*)';
+                        }
+                    }
+                } catch (Throwable $e) {
+                    $actions[] = $class . '::' . $name . ':error';
+                }
             }
         }
+
+        // Listing pages embed loop cards — purge them whenever any show is touched.
+        foreach ($urls_to_purge as $u) {
+            if (function_exists('rocket_clean_files')) {
+                rocket_clean_files($u);
+            }
+            do_action('litespeed_purge_url', $u);
+        }
+        if (function_exists('rocket_clean_home')) {
+            rocket_clean_home();
+            $actions[] = 'rocket_clean_home';
+        }
+        $actions[] = 'listing_urls_purged';
 
         // Bump modified time so Last-Modified / LM-based layers move.
         wp_update_post(array(
@@ -1336,10 +1397,23 @@ class Vernal_API {
         ));
         $actions[] = 'wp_update_post_touch';
 
+        // Also touch Episodes + Home so Airlift listing shells invalidate.
+        foreach (array(924, 355) as $listing_id) {
+            if ($listing_id === $post_id || !get_post($listing_id)) {
+                continue;
+            }
+            wp_update_post(array(
+                'ID' => $listing_id,
+                'post_title' => get_post_field('post_title', $listing_id),
+            ));
+            $actions[] = 'wp_update_post_touch:' . $listing_id;
+        }
+
         return array(
             'url' => $url,
             'actions' => array_values(array_unique($actions)),
             'classes_probed' => array_values(array_unique($classes_probed)),
+            'urls_purged' => $urls_to_purge,
         );
     }
 
