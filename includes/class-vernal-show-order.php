@@ -41,7 +41,7 @@ class Vernal_Show_Order {
             return $clauses;
         }
         $clauses['join'] .= " LEFT JOIN {$wpdb->postmeta} AS vernal_show_number ON ({$wpdb->posts}.ID = vernal_show_number.post_id AND vernal_show_number.meta_key = 'show_number') ";
-        $clauses['orderby'] = "CAST(vernal_show_number.meta_value AS UNSIGNED) DESC, {$wpdb->posts}.post_date DESC";
+        $clauses['orderby'] = "CAST(vernal_show_number.meta_value AS UNSIGNED) DESC, vernal_show_number.meta_value DESC, {$wpdb->posts}.post_date DESC";
         $clauses['groupby'] = $clauses['groupby'] ? $clauses['groupby'] : "{$wpdb->posts}.ID";
         return $clauses;
     }
