@@ -99,6 +99,20 @@ class Vernal_API {
             'permission_callback' => array($this, 'check_api_key'),
         ));
 
+        register_rest_route($namespace, '/media/(?P<id>\d+)', array(
+            'methods' => 'PATCH',
+            'callback' => array($this, 'patch_media'),
+            'permission_callback' => array($this, 'check_api_key'),
+            'args' => array(
+                'id' => array(
+                    'required' => true,
+                    'validate_callback' => function ($param) {
+                        return is_numeric($param);
+                    },
+                ),
+            ),
+        ));
+
         register_rest_route($namespace, '/media', array(
             'methods' => 'POST',
             'callback' => array($this, 'upload_media'),
@@ -671,16 +685,20 @@ class Vernal_API {
             wp_set_post_tags($post_id, $params['tags']);
         }
         
-        // Set featured image if provided (also used as ACF thumbnail attachment)
+        // Set featured image if provided (also used as ACF thumbnail attachment).
+        // Prefer structured featured_image when valid; always accept featured_image_url for legacy.
         $thumbnail_attachment_id = 0;
-        $image_url = '';
-        if (!empty($params['thumbnail_url'])) {
-            $image_url = esc_url_raw($params['thumbnail_url']);
-        } elseif (!empty($params['featured_image_url'])) {
-            $image_url = esc_url_raw($params['featured_image_url']);
-        }
-        if (!empty($image_url)) {
-            $thumbnail_attachment_id = $this->sideload_image_attachment($post_id, $image_url);
+        $resolved = $this->resolve_featured_image_params($params);
+        if (!empty($resolved['url'])) {
+            $thumbnail_attachment_id = $this->sideload_image_attachment(
+                $post_id,
+                $resolved['url'],
+                $resolved['seo'],
+                array(
+                    'role' => 'cover',
+                    'episode_id' => $this->extract_vernal_episode_id($params),
+                )
+            );
             if ($thumbnail_attachment_id) {
                 set_post_thumbnail($post_id, $thumbnail_attachment_id);
             }
@@ -1019,15 +1037,21 @@ class Vernal_API {
             }
         }
         // Surgical renumber / cover refresh — sideload without touching ACF guest fields.
-        if (!empty($params['featured_image_url'])) {
-            $image_url = esc_url_raw($params['featured_image_url']);
-            if (!empty($image_url)) {
-                $thumbnail_attachment_id = $this->sideload_image_attachment($post_id, $image_url);
-                if ($thumbnail_attachment_id) {
-                    set_post_thumbnail($post_id, $thumbnail_attachment_id);
-                    $this->set_acf_or_meta($post_id, 'thumbnail', $thumbnail_attachment_id);
-                    $updated_keys[] = 'featured_image';
-                }
+        $resolved = $this->resolve_featured_image_params($params);
+        if (!empty($resolved['url'])) {
+            $thumbnail_attachment_id = $this->sideload_image_attachment(
+                $post_id,
+                $resolved['url'],
+                $resolved['seo'],
+                array(
+                    'role' => 'cover',
+                    'episode_id' => $this->extract_vernal_episode_id($params),
+                )
+            );
+            if ($thumbnail_attachment_id) {
+                set_post_thumbnail($post_id, $thumbnail_attachment_id);
+                $this->set_acf_or_meta($post_id, 'thumbnail', $thumbnail_attachment_id);
+                $updated_keys[] = 'featured_image';
             }
         }
         $verified = array();
@@ -1947,9 +1971,22 @@ class Vernal_API {
             }
             $seen_keys[$key] = true;
 
+            $shirt_seo = $this->normalize_image_seo_meta(
+                isset($asset['image_seo']) && is_array($asset['image_seo'])
+                    ? $asset['image_seo']
+                    : $asset
+            );
             $attachment_id = $this->find_shirt_attachment_by_key($post_id, $key);
             if (!$attachment_id) {
-                $attachment_id = $this->sideload_image_attachment($post_id, $url);
+                $attachment_id = $this->sideload_image_attachment(
+                    $post_id,
+                    $url,
+                    $shirt_seo,
+                    array(
+                        'role' => 'shirt',
+                        'episode_id' => '',
+                    )
+                );
                 if ($attachment_id) {
                     update_post_meta($attachment_id, '_vernal_shirt_key', $key);
                     update_post_meta($attachment_id, '_vernal_shirt_side', $side);
@@ -1960,6 +1997,9 @@ class Vernal_API {
                         update_post_meta($attachment_id, '_vernal_shirt_build_id', $build_id);
                     }
                 }
+            } elseif (!empty($shirt_seo)) {
+                // Reuse existing attachment; refresh SEO when provided.
+                $this->apply_attachment_seo_meta($attachment_id, $shirt_seo, false);
             }
             if (!$attachment_id) {
                 continue;
@@ -2315,9 +2355,212 @@ class Vernal_API {
     }
 
     /**
-     * Sideload a remote image and return the attachment ID (0 on failure).
+     * Resolve featured image URL + SEO from request params.
+     * Precedence: valid featured_image object with url wins; else featured_image_url / thumbnail_url.
+     *
+     * @param array $params
+     * @return array{url:string,seo:array}
      */
-    private function sideload_image_attachment($post_id, $image_url) {
+    private function resolve_featured_image_params($params) {
+        $seo = array();
+        $url = '';
+        if (!empty($params['featured_image']) && is_array($params['featured_image'])) {
+            $fi = $params['featured_image'];
+            $fi_url = isset($fi['url']) ? esc_url_raw((string) $fi['url']) : '';
+            if ($fi_url !== '') {
+                $url = $fi_url;
+                $seo = $this->normalize_image_seo_meta($fi);
+            }
+        }
+        if ($url === '') {
+            if (!empty($params['thumbnail_url'])) {
+                $url = esc_url_raw((string) $params['thumbnail_url']);
+            } elseif (!empty($params['featured_image_url'])) {
+                $url = esc_url_raw((string) $params['featured_image_url']);
+            }
+            // Dual-send: SEO may still be on featured_image even when URL came from legacy field.
+            if ($url !== '' && !empty($params['featured_image']) && is_array($params['featured_image'])) {
+                $seo = $this->normalize_image_seo_meta($params['featured_image']);
+            }
+        }
+        return array('url' => $url, 'seo' => $seo);
+    }
+
+    /**
+     * @param array $params
+     * @return string
+     */
+    private function extract_vernal_episode_id($params) {
+        if (!empty($params['meta']) && is_array($params['meta']) && !empty($params['meta']['vernal_episode_id'])) {
+            return sanitize_text_field((string) $params['meta']['vernal_episode_id']);
+        }
+        if (!empty($params['vernal_episode_id'])) {
+            return sanitize_text_field((string) $params['vernal_episode_id']);
+        }
+        return '';
+    }
+
+    /**
+     * Normalize optional image SEO fields from a payload fragment.
+     * Keys: title, alt, caption, description. Missing keys omitted (preserve on PATCH).
+     *
+     * @param array $raw
+     * @return array
+     */
+    private function normalize_image_seo_meta($raw) {
+        if (!is_array($raw)) {
+            return array();
+        }
+        $out = array();
+        $map = array(
+            'title' => 'title',
+            'alt' => 'alt',
+            'caption' => 'caption',
+            'description' => 'description',
+        );
+        foreach ($map as $src => $dst) {
+            if (!array_key_exists($src, $raw)) {
+                continue;
+            }
+            $val = $raw[$src];
+            if ($val === null) {
+                $out[$dst] = '';
+                continue;
+            }
+            if (!is_string($val) && !is_numeric($val)) {
+                continue;
+            }
+            $str = (string) $val;
+            if (strlen($str) > 5000) {
+                $str = substr($str, 0, 5000);
+            }
+            $out[$dst] = $str;
+        }
+        return $out;
+    }
+
+    /**
+     * Apply title/caption/description/alt to an attachment.
+     * When $replace_all is false, only write keys present in $seo.
+     * Skips write when values are unchanged.
+     *
+     * @param int   $attachment_id
+     * @param array $seo
+     * @param bool  $replace_all
+     * @return bool True if any field changed
+     */
+    private function apply_attachment_seo_meta($attachment_id, $seo, $replace_all = true) {
+        $attachment_id = intval($attachment_id);
+        if ($attachment_id <= 0 || !is_array($seo) || empty($seo)) {
+            return false;
+        }
+        $post = get_post($attachment_id);
+        if (!$post || $post->post_type !== 'attachment') {
+            return false;
+        }
+        $changed = false;
+        $update = array('ID' => $attachment_id);
+
+        if (array_key_exists('title', $seo)) {
+            $title = sanitize_text_field($seo['title']);
+            if ($title !== (string) $post->post_title) {
+                $update['post_title'] = $title;
+                $changed = true;
+            }
+        } elseif ($replace_all) {
+            // no-op for absent
+        }
+
+        if (array_key_exists('caption', $seo)) {
+            $caption = sanitize_textarea_field($seo['caption']);
+            if ($caption !== (string) $post->post_excerpt) {
+                $update['post_excerpt'] = $caption;
+                $changed = true;
+            }
+        }
+
+        if (array_key_exists('description', $seo)) {
+            $desc = sanitize_textarea_field($seo['description']);
+            if ($desc !== (string) $post->post_content) {
+                $update['post_content'] = $desc;
+                $changed = true;
+            }
+        }
+
+        if (count($update) > 1) {
+            wp_update_post($update);
+        }
+
+        if (array_key_exists('alt', $seo)) {
+            $alt = sanitize_text_field($seo['alt']);
+            $cur = get_post_meta($attachment_id, '_wp_attachment_image_alt', true);
+            if ((string) $cur !== (string) $alt) {
+                update_post_meta($attachment_id, '_wp_attachment_image_alt', $alt);
+                $changed = true;
+            }
+        }
+
+        return $changed;
+    }
+
+    /**
+     * Stamp durable Vernal ownership meta on new sideloads.
+     *
+     * @param int   $attachment_id
+     * @param int   $post_id
+     * @param array $ownership role, episode_id
+     */
+    private function stamp_vernal_image_ownership($attachment_id, $post_id, $ownership = array()) {
+        $attachment_id = intval($attachment_id);
+        if ($attachment_id <= 0) {
+            return;
+        }
+        $role = isset($ownership['role']) ? sanitize_key((string) $ownership['role']) : '';
+        if ($role !== '') {
+            update_post_meta($attachment_id, '_vernal_image_role', $role);
+        }
+        $episode_id = isset($ownership['episode_id']) ? sanitize_text_field((string) $ownership['episode_id']) : '';
+        if ($episode_id === '' && $post_id) {
+            $episode_id = sanitize_text_field((string) get_post_meta(intval($post_id), 'vernal_episode_id', true));
+        }
+        if ($episode_id !== '') {
+            update_post_meta($attachment_id, '_vernal_episode_id', $episode_id);
+        }
+        update_post_meta($attachment_id, '_vernal_managed', '1');
+    }
+
+    /**
+     * True when attachment title looks like a CDN basename (safe to overwrite on URL-only resync skip).
+     *
+     * @param string $title
+     * @return bool
+     */
+    private function is_filename_like_attachment_title($title) {
+        $t = trim((string) $title);
+        if ($t === '') {
+            return true;
+        }
+        if (preg_match('/^(dalle[_-]|podcast_cover[_-]|podcast_shirt[_-]|featured-\d+)/i', $t)) {
+            return true;
+        }
+        if (preg_match('/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i', $t)) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Sideload a remote image and return the attachment ID (0 on failure).
+     * Optional $seo writes title/caption/description/alt after sideload.
+     * If SEO is empty and an existing non-filename title would be wiped — N/A on new sideload.
+     *
+     * @param int         $post_id
+     * @param string      $image_url
+     * @param array       $seo
+     * @param array       $ownership
+     * @return int
+     */
+    private function sideload_image_attachment($post_id, $image_url, $seo = array(), $ownership = array()) {
         require_once(ABSPATH . 'wp-admin/includes/media.php');
         require_once(ABSPATH . 'wp-admin/includes/file.php');
         require_once(ABSPATH . 'wp-admin/includes/image.php');
@@ -2342,7 +2585,12 @@ class Vernal_API {
             @unlink($file_array['tmp_name']);
             return 0;
         }
-        return intval($id);
+        $id = intval($id);
+        if (!empty($seo) && is_array($seo)) {
+            $this->apply_attachment_seo_meta($id, $seo, true);
+        }
+        $this->stamp_vernal_image_ownership($id, intval($post_id), is_array($ownership) ? $ownership : array());
+        return $id;
     }
 
     /**
@@ -2385,6 +2633,17 @@ class Vernal_API {
 
         if ($length <= 0) {
             $length = $this->probe_remote_content_length($media_url);
+        }
+
+        // Never write a zero-length enclosure — listing/detail players disappear.
+        // Prefer keeping a usable existing enclosure over clobbering it with length=0.
+        $existing = $this->read_powerpress_enclosure($post_id);
+        $existing_length = ($existing && isset($existing['length'])) ? intval($existing['length']) : 0;
+        if ($length <= 0 && $existing_length > 0) {
+            return;
+        }
+        if ($length <= 0) {
+            return;
         }
 
         // Multiline enclosure — do not sanitize_text_field (strips newlines).
@@ -2679,10 +2938,21 @@ class Vernal_API {
         if (isset($move['error'])) {
             return new WP_Error('upload_error', $move['error'], array('status' => 400));
         }
+
+        $params = $request->get_params();
+        if (!is_array($params)) {
+            $params = array();
+        }
+        $seo = $this->normalize_image_seo_meta($params);
+        $title = !empty($seo['title'])
+            ? sanitize_text_field($seo['title'])
+            : sanitize_file_name(basename($move['file']));
+
         $attachment = array(
             'post_mime_type' => $move['type'],
-            'post_title' => sanitize_file_name(basename($move['file'])),
-            'post_content' => '',
+            'post_title' => $title,
+            'post_content' => isset($seo['description']) ? sanitize_textarea_field($seo['description']) : '',
+            'post_excerpt' => isset($seo['caption']) ? sanitize_textarea_field($seo['caption']) : '',
             'post_status' => 'inherit',
         );
         $attach_id = wp_insert_attachment($attachment, $move['file']);
@@ -2691,6 +2961,13 @@ class Vernal_API {
         }
         $meta = wp_generate_attachment_metadata($attach_id, $move['file']);
         wp_update_attachment_metadata($attach_id, $meta);
+        if (array_key_exists('alt', $seo)) {
+            update_post_meta($attach_id, '_wp_attachment_image_alt', sanitize_text_field($seo['alt']));
+        }
+        $this->stamp_vernal_image_ownership($attach_id, 0, array(
+            'role' => isset($params['role']) ? sanitize_key((string) $params['role']) : '',
+            'episode_id' => isset($params['vernal_episode_id']) ? sanitize_text_field((string) $params['vernal_episode_id']) : '',
+        ));
         $post = get_post($attach_id);
         return rest_ensure_response(array(
             'success' => true,
@@ -2698,17 +2975,159 @@ class Vernal_API {
         ));
     }
 
+    /**
+     * PATCH /media/{id} — update attachment SEO fields without replacing the file.
+     * Omitted keys are preserved; explicit empty string clears the field.
+     */
+    public function patch_media($request) {
+        $id = intval($request['id']);
+        $post = get_post($id);
+        if (!$post || $post->post_type !== 'attachment') {
+            return new WP_Error(
+                'not_found',
+                __('Media not found', 'vernal-contentum'),
+                array('status' => 404)
+            );
+        }
+
+        $params = $request->get_json_params();
+        if (!is_array($params)) {
+            $params = $request->get_params();
+        }
+        if (!is_array($params)) {
+            return new WP_Error(
+                'invalid',
+                __('JSON body required', 'vernal-contentum'),
+                array('status' => 400)
+            );
+        }
+
+        // Ownership: must be Vernal-managed or featured/shirt child of a Vernal post.
+        $owned = $this->attachment_is_vernal_owned($id, $params);
+        if (is_wp_error($owned)) {
+            return $owned;
+        }
+        if (!$owned) {
+            return new WP_Error(
+                'forbidden_attachment',
+                __('Attachment is not Vernal-managed or ownership is ambiguous', 'vernal-contentum'),
+                array('status' => 403)
+            );
+        }
+
+        $seo = $this->normalize_image_seo_meta($params);
+        if (empty($seo)) {
+            return rest_ensure_response(array(
+                'success' => true,
+                'data' => $this->format_media_item($post),
+                'changed' => false,
+            ));
+        }
+
+        $changed = $this->apply_attachment_seo_meta($id, $seo, false);
+        $post = get_post($id);
+        return rest_ensure_response(array(
+            'success' => true,
+            'data' => $this->format_media_item($post),
+            'changed' => (bool) $changed,
+        ));
+    }
+
+    /**
+     * @param int   $attachment_id
+     * @param array $params optional expected_post_id / expected_episode_id
+     * @return bool|WP_Error
+     */
+    private function attachment_is_vernal_owned($attachment_id, $params = array()) {
+        $attachment_id = intval($attachment_id);
+        if (get_post_meta($attachment_id, '_vernal_managed', true)
+            || get_post_meta($attachment_id, '_vernal_shirt_key', true)
+            || get_post_meta($attachment_id, '_vernal_image_role', true)
+            || get_post_meta($attachment_id, '_vernal_episode_id', true)
+        ) {
+            $expected_ep = isset($params['expected_episode_id'])
+                ? sanitize_text_field((string) $params['expected_episode_id'])
+                : '';
+            if ($expected_ep !== '') {
+                $got = sanitize_text_field((string) get_post_meta($attachment_id, '_vernal_episode_id', true));
+                if ($got !== '' && $got !== $expected_ep) {
+                    return new WP_Error(
+                        'conflict_attachment',
+                        __('Attachment episode identity does not match expected_episode_id', 'vernal-contentum'),
+                        array('status' => 409)
+                    );
+                }
+            }
+            return true;
+        }
+
+        // Featured image of a Vernal-tagged post.
+        $q = new WP_Query(array(
+            'post_type' => 'any',
+            'post_status' => 'any',
+            'posts_per_page' => 5,
+            'fields' => 'ids',
+            'meta_query' => array(
+                'relation' => 'AND',
+                array(
+                    'key' => '_thumbnail_id',
+                    'value' => $attachment_id,
+                    'compare' => '=',
+                ),
+                array(
+                    'key' => 'vernal_episode_id',
+                    'compare' => 'EXISTS',
+                ),
+            ),
+        ));
+        if (!empty($q->posts)) {
+            $expected_post = isset($params['expected_post_id']) ? intval($params['expected_post_id']) : 0;
+            if ($expected_post > 0 && !in_array($expected_post, array_map('intval', $q->posts), true)) {
+                return new WP_Error(
+                    'conflict_attachment',
+                    __('Attachment is featured on a different Vernal post', 'vernal-contentum'),
+                    array('status' => 409)
+                );
+            }
+            return true;
+        }
+
+        // Parent post carries vernal_episode_id (weak alone — still allow PATCH when expected_post_id matches).
+        $parent = (int) wp_get_post_parent_id($attachment_id);
+        if ($parent > 0 && get_post_meta($parent, 'vernal_episode_id', true)) {
+            $expected_post = isset($params['expected_post_id']) ? intval($params['expected_post_id']) : 0;
+            if ($expected_post > 0 && $expected_post !== $parent) {
+                return new WP_Error(
+                    'conflict_attachment',
+                    __('Attachment parent does not match expected_post_id', 'vernal-contentum'),
+                    array('status' => 409)
+                );
+            }
+            return true;
+        }
+
+        return false;
+    }
+
     private function format_media_item($post) {
         $id = (int) $post->ID;
+        $alt = get_post_meta($id, '_wp_attachment_image_alt', true);
         return array(
             'id' => $id,
             'media_id' => $id,
             'title' => get_the_title($id),
+            'caption' => isset($post->post_excerpt) ? $post->post_excerpt : '',
+            'description' => isset($post->post_content) ? $post->post_content : '',
+            'alt' => is_string($alt) ? $alt : '',
             'url' => wp_get_attachment_url($id),
             'source_url' => wp_get_attachment_url($id),
             'mime_type' => get_post_mime_type($id),
             'mime' => get_post_mime_type($id),
+            'parent' => (int) $post->post_parent,
             'date' => $post->post_date,
+            'vernal_managed' => (bool) get_post_meta($id, '_vernal_managed', true),
+            'vernal_image_role' => (string) get_post_meta($id, '_vernal_image_role', true),
+            'vernal_episode_id' => (string) get_post_meta($id, '_vernal_episode_id', true),
         );
     }
 
