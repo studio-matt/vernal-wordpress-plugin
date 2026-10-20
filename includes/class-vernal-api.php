@@ -3061,6 +3061,16 @@ class Vernal_API {
             return true;
         }
 
+        // Machine-asserted featured: expected_post_id's _thumbnail_id matches this attachment.
+        // Covers articles / legacy posts that lack vernal_episode_id meta.
+        $expected_post = isset($params['expected_post_id']) ? intval($params['expected_post_id']) : 0;
+        if ($expected_post > 0) {
+            $thumb = (int) get_post_thumbnail_id($expected_post);
+            if ($thumb === $attachment_id) {
+                return true;
+            }
+        }
+
         // Featured image of a Vernal-tagged post.
         $q = new WP_Query(array(
             'post_type' => 'any',
@@ -3081,7 +3091,6 @@ class Vernal_API {
             ),
         ));
         if (!empty($q->posts)) {
-            $expected_post = isset($params['expected_post_id']) ? intval($params['expected_post_id']) : 0;
             if ($expected_post > 0 && !in_array($expected_post, array_map('intval', $q->posts), true)) {
                 return new WP_Error(
                     'conflict_attachment',
@@ -3095,7 +3104,6 @@ class Vernal_API {
         // Parent post carries vernal_episode_id (weak alone — still allow PATCH when expected_post_id matches).
         $parent = (int) wp_get_post_parent_id($attachment_id);
         if ($parent > 0 && get_post_meta($parent, 'vernal_episode_id', true)) {
-            $expected_post = isset($params['expected_post_id']) ? intval($params['expected_post_id']) : 0;
             if ($expected_post > 0 && $expected_post !== $parent) {
                 return new WP_Error(
                     'conflict_attachment',
