@@ -1096,6 +1096,13 @@ class Vernal_API {
             }
         }
 
+        // Post-level AIOSEO when seo key is explicitly supplied. Absence preserves
+        // existing SEO (do not clear). Partial objects must not erase omitted fields.
+        if (isset($params['seo']) && is_array($params['seo']) && class_exists('Vernal_SEO_Adapter')) {
+            Vernal_SEO_Adapter::get_instance()->apply_from_request($post_id, $params);
+            $updated_keys[] = 'seo';
+        }
+
         // ACF/meta updates alone often do not invalidate Airlift/page caches.
         $cache_purge = $this->purge_page_caches_for_post($post_id);
 
@@ -2225,10 +2232,16 @@ class Vernal_API {
                         }
                     }
                 }
-                // Canonical write for Elementor: always ih_partner_gallery.
-                $this->set_acf_gallery_ids($post_id, 'ih_partner_gallery', $ids);
-                if ($target_key !== 'ih_partner_gallery' && $target_key !== 'field_ih_partner_gallery') {
-                    $this->set_acf_gallery_ids($post_id, $target_key, $ids);
+                // Write the requested gallery key. Partner posts also mirror to the
+                // Elementor-bound ih_partner_gallery when an alias was used.
+                $this->set_acf_gallery_ids($post_id, $target_key, $ids);
+                $partner_aliases = array(
+                    'ih_partner_gallery',
+                    'field_ih_partner_gallery',
+                    'partner_gallery',
+                );
+                if (in_array($target_key, $partner_aliases, true) && $target_key !== 'ih_partner_gallery') {
+                    $this->set_acf_gallery_ids($post_id, 'ih_partner_gallery', $ids);
                 }
                 continue;
             }
@@ -2563,7 +2576,7 @@ class Vernal_API {
         if ($t === '') {
             return true;
         }
-        if (preg_match('/^(dalle[_-]|podcast_cover[_-]|podcast_shirt[_-]|featured-\d+)/i', $t)) {
+            if (preg_match('/^(dalle[_-]|podcast_cover[_-]|podcast_shirt[_-]|podcast_guest_headshot[_-]|partner_gallery[_-]|yt_build[_-]|featured-\d+)/i', $t)) {
             return true;
         }
         if (preg_match('/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i', $t)) {
@@ -2587,6 +2600,22 @@ class Vernal_API {
         require_once(ABSPATH . 'wp-admin/includes/media.php');
         require_once(ABSPATH . 'wp-admin/includes/file.php');
         require_once(ABSPATH . 'wp-admin/includes/image.php');
+
+        $image_url = esc_url_raw(trim((string) $image_url));
+        if ($image_url === '' || !preg_match('#^https?://#i', $image_url)) {
+            return 0;
+        }
+
+        // Idempotency: reuse existing child attachment with same source URL.
+        $existing = $this->find_attachment_by_source_url(intval($post_id), $image_url);
+        if ($existing > 0) {
+            if (!empty($seo) && is_array($seo)) {
+                $this->apply_attachment_seo_meta($existing, $seo, false);
+            }
+            $this->stamp_vernal_image_ownership($existing, intval($post_id), is_array($ownership) ? $ownership : array());
+            update_post_meta($existing, '_vernal_source_url', $image_url);
+            return $existing;
+        }
 
         $tmp = download_url($image_url);
         if (is_wp_error($tmp)) {
@@ -2613,7 +2642,42 @@ class Vernal_API {
             $this->apply_attachment_seo_meta($id, $seo, true);
         }
         $this->stamp_vernal_image_ownership($id, intval($post_id), is_array($ownership) ? $ownership : array());
+        update_post_meta($id, '_vernal_source_url', $image_url);
         return $id;
+    }
+
+    /**
+     * Find an attachment owned by $post_id that was sideloaded from $image_url.
+     * Never matches by basename alone.
+     *
+     * @param int    $post_id
+     * @param string $image_url
+     * @return int
+     */
+    private function find_attachment_by_source_url($post_id, $image_url) {
+        $post_id = intval($post_id);
+        $image_url = esc_url_raw(trim((string) $image_url));
+        if ($post_id <= 0 || $image_url === '') {
+            return 0;
+        }
+        $q = new WP_Query(array(
+            'post_type' => 'attachment',
+            'post_status' => 'inherit',
+            'post_parent' => $post_id,
+            'posts_per_page' => 5,
+            'fields' => 'ids',
+            'meta_query' => array(
+                array(
+                    'key' => '_vernal_source_url',
+                    'value' => $image_url,
+                    'compare' => '=',
+                ),
+            ),
+        ));
+        if (!empty($q->posts)) {
+            return intval($q->posts[0]);
+        }
+        return 0;
     }
 
     /**

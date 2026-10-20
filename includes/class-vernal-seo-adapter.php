@@ -87,10 +87,11 @@ class Vernal_SEO_Adapter {
             }
         }
 
-        $seo = isset($params['seo']) && is_array($params['seo']) ? $params['seo'] : null;
-        if (!$seo) {
+        // Absence of seo key means preserve existing SEO (caller must not pass seo).
+        if (!array_key_exists('seo', $params) || !is_array($params['seo'])) {
             return;
         }
+        $seo = $params['seo'];
 
         if ($this->is_aioseo_active()) {
             $this->apply_aioseo($post_id, $seo, $excerpt);
@@ -100,17 +101,27 @@ class Vernal_SEO_Adapter {
 
     /**
      * Map Vernal manifest → AIOSEO storage (implementation detail).
+     * Partial SEO objects: only keys present are written; omitted keys are preserved.
      */
     private function apply_aioseo($post_id, array $seo, $fallback_excerpt = '') {
-        $title = isset($seo['title']) ? wp_strip_all_tags((string) $seo['title']) : '';
-        $description = isset($seo['description'])
-            ? wp_strip_all_tags((string) $seo['description'])
-            : $fallback_excerpt;
-        $primary = isset($seo['primary_keyphrase'])
-            ? wp_strip_all_tags((string) $seo['primary_keyphrase'])
-            : '';
+        $has_title = array_key_exists('title', $seo);
+        $has_description = array_key_exists('description', $seo);
+        $has_primary = array_key_exists('primary_keyphrase', $seo);
+        $has_secondaries = array_key_exists('secondary_keyphrases', $seo);
+        $has_social = array_key_exists('social', $seo) && is_array($seo['social']);
+        $has_canonical = array_key_exists('canonical_url', $seo);
+
+        $title = $has_title ? wp_strip_all_tags((string) $seo['title']) : '';
+        $description = '';
+        if ($has_description) {
+            $description = wp_strip_all_tags((string) $seo['description']);
+        } elseif ($has_title && $fallback_excerpt !== '') {
+            // Only use excerpt fallback when title is also being set (full-ish update).
+            $description = sanitize_textarea_field($fallback_excerpt);
+        }
+        $primary = $has_primary ? wp_strip_all_tags((string) $seo['primary_keyphrase']) : '';
         $secondaries = array();
-        if (!empty($seo['secondary_keyphrases']) && is_array($seo['secondary_keyphrases'])) {
+        if ($has_secondaries && is_array($seo['secondary_keyphrases'])) {
             foreach ($seo['secondary_keyphrases'] as $s) {
                 $s = wp_strip_all_tags((string) $s);
                 if ($s !== '') {
@@ -118,22 +129,29 @@ class Vernal_SEO_Adapter {
                 }
             }
         }
-        $social = isset($seo['social']) && is_array($seo['social']) ? $seo['social'] : array();
-        $og_title = !empty($social['title']) ? wp_strip_all_tags((string) $social['title']) : $title;
-        $og_desc = !empty($social['description'])
-            ? wp_strip_all_tags((string) $social['description'])
-            : $description;
-        $canonical = !empty($seo['canonical_url']) ? esc_url_raw((string) $seo['canonical_url']) : '';
+        $social = $has_social ? $seo['social'] : array();
+        $og_title = '';
+        $og_desc = '';
+        if ($has_social) {
+            $og_title = !empty($social['title']) ? wp_strip_all_tags((string) $social['title']) : $title;
+            $og_desc = !empty($social['description'])
+                ? wp_strip_all_tags((string) $social['description'])
+                : $description;
+        } elseif ($has_title) {
+            $og_title = $title;
+            $og_desc = $description;
+        }
+        $canonical = $has_canonical ? esc_url_raw((string) $seo['canonical_url']) : '';
 
         // Prefer AIOSEO model API when available
         if (class_exists('\AIOSEO\Plugin\Common\Models\Post')) {
             try {
                 $aioseo_post = \AIOSEO\Plugin\Common\Models\Post::getPost($post_id);
                 if ($aioseo_post) {
-                    if ($title !== '') {
+                    if ($has_title && $title !== '') {
                         $aioseo_post->title = $title;
                     }
-                    if ($description !== '') {
+                    if (($has_description || ($has_title && $description !== '')) && $description !== '') {
                         $aioseo_post->description = $description;
                     }
                     if ($og_title !== '') {
@@ -142,10 +160,10 @@ class Vernal_SEO_Adapter {
                     if ($og_desc !== '') {
                         $aioseo_post->og_description = $og_desc;
                     }
-                    if ($canonical !== '') {
+                    if ($has_canonical && $canonical !== '') {
                         $aioseo_post->canonical_url = $canonical;
                     }
-                    if ($primary !== '') {
+                    if ($has_primary && $primary !== '') {
                         $keyphrases = array(
                             'focus' => array(
                                 'keyphrase' => $primary,
@@ -174,13 +192,13 @@ class Vernal_SEO_Adapter {
         }
 
         // Compatibility duplicates (not canonical for AIOSEO, but harmless)
-        if ($title !== '') {
+        if ($has_title && $title !== '') {
             update_post_meta($post_id, '_aioseo_title', $title);
         }
-        if ($description !== '') {
+        if ($has_description && $description !== '') {
             update_post_meta($post_id, '_aioseo_description', $description);
         }
-        if ($primary !== '') {
+        if ($has_primary && $primary !== '') {
             update_post_meta($post_id, '_aioseo_keywords', $primary);
         }
 
