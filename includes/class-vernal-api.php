@@ -2205,9 +2205,21 @@ class Vernal_API {
                         $ids[] = intval($item);
                         continue;
                     }
-                    $url = is_string($item) ? esc_url_raw(trim($item)) : '';
+                    // Structured gallery item: { url, title, alt, caption, description }
+                    $url = '';
+                    $seo = array();
+                    if (is_array($item)) {
+                        $url = isset($item['url']) ? esc_url_raw(trim((string) $item['url'])) : '';
+                        $seo = $this->normalize_image_seo_meta(
+                            isset($item['image_seo']) && is_array($item['image_seo'])
+                                ? $item['image_seo']
+                                : $item
+                        );
+                    } elseif (is_string($item)) {
+                        $url = esc_url_raw(trim($item));
+                    }
                     if ($url && preg_match('#^https?://#i', $url)) {
-                        $att = $this->sideload_image_attachment($post_id, $url);
+                        $att = $this->sideload_image_attachment($post_id, $url, $seo);
                         if ($att) {
                             $ids[] = $att;
                         }
@@ -2226,9 +2238,20 @@ class Vernal_API {
                     $this->set_acf_or_meta($post_id, $target_key, intval($value));
                     continue;
                 }
-                $url = is_string($value) ? esc_url_raw(trim($value)) : '';
+                $url = '';
+                $seo = array();
+                if (is_array($value)) {
+                    $url = isset($value['url']) ? esc_url_raw(trim((string) $value['url'])) : '';
+                    $seo = $this->normalize_image_seo_meta(
+                        isset($value['image_seo']) && is_array($value['image_seo'])
+                            ? $value['image_seo']
+                            : $value
+                    );
+                } elseif (is_string($value)) {
+                    $url = esc_url_raw(trim($value));
+                }
                 if ($url && preg_match('#^https?://#i', $url)) {
-                    $att = $this->sideload_image_attachment($post_id, $url);
+                    $att = $this->sideload_image_attachment($post_id, $url, $seo);
                     if ($att) {
                         $this->set_acf_or_meta($post_id, $target_key, $att);
                     }
@@ -3061,12 +3084,17 @@ class Vernal_API {
             return true;
         }
 
-        // Machine-asserted featured: expected_post_id's _thumbnail_id matches this attachment.
-        // Covers articles / legacy posts that lack vernal_episode_id meta.
+        // Machine-asserted ownership via expected_post_id:
+        // - featured thumbnail of that post, OR
+        // - attachment post_parent is that post (partner galleries, headshots, etc.)
         $expected_post = isset($params['expected_post_id']) ? intval($params['expected_post_id']) : 0;
         if ($expected_post > 0) {
             $thumb = (int) get_post_thumbnail_id($expected_post);
             if ($thumb === $attachment_id) {
+                return true;
+            }
+            $parent_of_att = (int) wp_get_post_parent_id($attachment_id);
+            if ($parent_of_att > 0 && $parent_of_att === $expected_post) {
                 return true;
             }
         }
@@ -3101,9 +3129,13 @@ class Vernal_API {
             return true;
         }
 
-        // Parent post carries vernal_episode_id (weak alone — still allow PATCH when expected_post_id matches).
+        // Parent post carries Vernal identity (episode or partner).
         $parent = (int) wp_get_post_parent_id($attachment_id);
-        if ($parent > 0 && get_post_meta($parent, 'vernal_episode_id', true)) {
+        if ($parent > 0 && (
+            get_post_meta($parent, 'vernal_episode_id', true)
+            || get_post_meta($parent, 'vernal_partner_id', true)
+            || get_post_meta($parent, 'vernal_object_type', true)
+        )) {
             if ($expected_post > 0 && $expected_post !== $parent) {
                 return new WP_Error(
                     'conflict_attachment',
