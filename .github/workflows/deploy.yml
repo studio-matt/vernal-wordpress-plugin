@@ -177,43 +177,19 @@ jobs:
           EOS
           echo "✓ Deployment verified"
 
-      - name: Deploy plugin into irreverenthealth account
-        continue-on-error: true
+      # Irreverent Health + siblings. Do NOT silently no-op — IH stuck on old plugin
+      # breaks PATCH /media and structured featured_image SEO.
+      - name: Deploy all sibling vernal-contentum installs (incl. Irreverent Health)
         run: |
-          set -uo pipefail
-          HOST="${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}"
-          DEST="/home/irreverenthealth/public_html/wp-content/plugins/vernal-contentum"
-          echo "Deploying to $DEST"
-          # Ensure destination exists (may fail if not writable)
-          ssh "$HOST" "mkdir -p '$DEST' && test -w '$DEST'" || {
-            echo "::warning::Cannot write $DEST"
-            exit 0
-          }
-          rsync -avz --delete \
-            --exclude='.git' --exclude='.git/**' --exclude='.github' \
-            --exclude='.gitignore' --exclude='README.md' --exclude='DEPLOYMENT.md' \
-            --exclude='VERSIONING.md' --exclude='TROUBLESHOOTING.md' \
-            --exclude='UPDATE_SYSTEM.md' --exclude='SECRETS_SETUP.md' --exclude='.DS_Store' \
-            ./ "$HOST:$DEST/" || {
-              echo "::warning::rsync to irreverenthealth failed"
-              exit 0
-            }
-          ssh "$HOST" "grep -E '^ \\* Version:' '$DEST/vernal-contentum.php' | head -1; rm -rf /home/irreverenthealth/public_html/wp-content/cache/airlift/* 2>/dev/null; echo done"
-          echo "✓ irreverenthealth plugin deploy attempted"
-
-      # Addon domains / sibling WP installs on the same cPanel account often keep a
-      # separate copy of the plugin (e.g. irreverenthealth.com). Sync every match.
-      # Best-effort: never fail the primary deploy if discovery/SSH flakes.
-      - name: Deploy to sibling vernal-contentum installs
-        continue-on-error: true
-        run: |
-          set -uo pipefail
+          set -euo pipefail
           HOST="${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}"
           PRIMARY="${{ secrets.SERVER_PATH }}"
-          echo "Discovering sibling plugin installs..."
+          EXPECTED_VER=$(grep -E '^\s*\*\s*Version:' vernal-contentum.php | head -1 | sed -E 's/.*Version:\s*([0-9.]+).*/\1/')
+          echo "Expected plugin version: $EXPECTED_VER"
+
           ssh_retry() {
             local n=0
-            until ssh -o ConnectTimeout=15 -o ServerAliveInterval=5 "$HOST" "$@"; do
+            until ssh -o ConnectTimeout=20 -o ServerAliveInterval=5 "$HOST" "$@"; do
               n=$((n+1))
               if [ "$n" -ge 4 ]; then
                 return 1
@@ -222,54 +198,69 @@ jobs:
               sleep $((n*3))
             done
           }
-          ssh_retry 'echo "whoami=$(whoami) HOME=$HOME"; ls -la "$HOME" 2>/dev/null | head -40; ls -la "$HOME/public_html" 2>/dev/null | head -30; ls -la "$HOME/domains" 2>/dev/null | head -30; ls /home 2>/dev/null | head -40; echo "--- airlift caches ---"; find "$HOME" -type d -path "*/cache/airlift" 2>/dev/null | head -20' || {
-            echo "::warning::SSH diagnose failed; skipping siblings"
-            exit 0
-          }
-          # Always wipe Airlift page-cache trees we can see (listing freezes live HTML).
-          ssh_retry 'set +e
-            find "$HOME" -type d -path "*/cache/airlift" 2>/dev/null | while read -r d; do
-              echo "Clearing $d"
-              rm -rf "$d"/* "$d"/.[!.]* 2>/dev/null
-              echo "cleared:$d"
-            done
-          ' || echo "::warning::Airlift cache clear skipped"
-          mapfile -t PATHS < <(ssh_retry 'set +e
-            WHO=$(whoami)
-            find "$HOME" /home/"$WHO" /home -xdev -type f -name vernal-contentum.php 2>/dev/null \
+
+          CANDIDATES=(
+            "/home/irreverenthealth/public_html/wp-content/plugins/vernal-contentum"
+            "/home/irreverenthealth/domains/irreverenthealth.com/public_html/wp-content/plugins/vernal-contentum"
+            "/home/irreverenthealth/www/wp-content/plugins/vernal-contentum"
+            "/home/irreverenthealth/public_html/domains/irreverenthealth.com/wp-content/plugins/vernal-contentum"
+          )
+
+          mapfile -t FOUND < <(ssh_retry 'set +e
+            find /home -xdev -type f -name vernal-contentum.php 2>/dev/null \
               | sed "s#/vernal-contentum.php\$##" | sort -u
           ' || true)
-          echo "Found ${#PATHS[@]} install(s):"
-          printf '  %s\n' "${PATHS[@]:-}"
-          if [ "${#PATHS[@]}" -eq 0 ]; then
-            echo "::warning::No vernal-contentum installs found via find; primary deploy only."
-            exit 0
-          fi
-          for DEST in "${PATHS[@]}"; do
-            DEST_N="${DEST%/}"
+
+          echo "Found on disk:"
+          printf '  %s\n' "${FOUND[@]:-}"
+
+          DEST_SET=()
+          for d in "${CANDIDATES[@]}" "${FOUND[@]}"; do
+            [ -n "${d:-}" ] || continue
+            DEST_SET+=("${d%/}")
+          done
+          mapfile -t DESTS < <(printf '%s\n' "${DEST_SET[@]}" | awk 'NF && !seen[$0]++')
+
+          IH_OK=0
+          ANY_SIBLING=0
+          for DEST_N in "${DESTS[@]}"; do
             PRIM_N="${PRIMARY%/}"
             if [ "$DEST_N" = "$PRIM_N" ]; then
-              echo "Skip primary: $DEST_N"
+              echo "Skip primary (already deployed): $DEST_N"
               continue
             fi
+            ANY_SIBLING=1
             echo "Deploying sibling: $DEST_N"
+            if ! ssh_retry "mkdir -p '$DEST_N' && test -w '$DEST_N'"; then
+              echo "::error::Cannot write $DEST_N"
+              continue
+            fi
             rsync -avz --delete \
-              --exclude='.git' \
-              --exclude='.git/**' \
-              --exclude='.github' \
-              --exclude='.gitignore' \
-              --exclude='README.md' \
-              --exclude='DEPLOYMENT.md' \
-              --exclude='VERSIONING.md' \
-              --exclude='TROUBLESHOOTING.md' \
-              --exclude='UPDATE_SYSTEM.md' \
-              --exclude='SECRETS_SETUP.md' \
-              --exclude='.DS_Store' \
-              ./ "$HOST:$DEST_N/" || {
-                echo "::warning::rsync to sibling failed: $DEST_N"
-                continue
-              }
-            VER=$(ssh "$HOST" "grep -E '^ \\* Version:' \"$DEST_N/vernal-contentum.php\" | head -1" || true)
-            echo "Sibling deployed: $DEST_N ($VER)"
+              --exclude='.git' --exclude='.git/**' --exclude='.github' \
+              --exclude='.gitignore' --exclude='README.md' --exclude='DEPLOYMENT.md' \
+              --exclude='VERSIONING.md' --exclude='TROUBLESHOOTING.md' \
+              --exclude='UPDATE_SYSTEM.md' --exclude='SECRETS_SETUP.md' --exclude='.DS_Store' \
+              ./ "$HOST:$DEST_N/"
+            VER_LINE=$(ssh_retry "grep -E '^ \\* Version:' '$DEST_N/vernal-contentum.php' | head -1" || true)
+            echo "  on-disk: $VER_LINE"
+            ssh_retry "touch '$DEST_N/vernal-contentum.php' '$DEST_N/includes/class-vernal-api.php' 2>/dev/null; true" || true
+            if echo "$VER_LINE" | grep -q "$EXPECTED_VER"; then
+              if echo "$DEST_N" | grep -qi irreverenthealth; then
+                IH_OK=1
+              fi
+            else
+              echo "::error::Version mismatch at $DEST_N (wanted $EXPECTED_VER)"
+            fi
+            ssh_retry "ROOT=\$(dirname \$(dirname \$(dirname '$DEST_N'))); rm -rf \"\$ROOT/cache/airlift\"/* 2>/dev/null; true" || true
           done
-          echo "Sibling deploys complete"
+
+          if [ "$ANY_SIBLING" -eq 0 ]; then
+            echo "::error::No sibling plugin installs found (Irreverent Health not updated)"
+            exit 1
+          fi
+          if [ "$IH_OK" -ne 1 ]; then
+            echo "::error::Irreverent Health plugin path was not updated to $EXPECTED_VER"
+            echo "Live site will keep serving the old plugin until this path is writable from the deploy user."
+            exit 1
+          fi
+          echo "✓ Sibling deploys verified at $EXPECTED_VER"
