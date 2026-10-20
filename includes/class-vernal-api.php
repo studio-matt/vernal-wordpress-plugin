@@ -2939,6 +2939,11 @@ class Vernal_API {
                     'configure_backend' => true,
                     'modules' => true,
                     'template_stamp' => true,
+                    'structured_media_seo' => true,
+                    'show_toc' => (!is_array($settings) || !array_key_exists('show_toc', $settings))
+                        ? true
+                        : !empty($settings['show_toc']),
+                    'toc_jsonld' => true,
                 ),
             ),
         ));

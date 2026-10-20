@@ -1405,7 +1405,8 @@ class Vernal_Settings {
     
     public function render_show_toc_field() {
         $settings = get_option('vernal_contentum_settings', array());
-        $value = isset($settings['show_toc']) ? $settings['show_toc'] : 0;
+        // Default ON when unset — part of the Vernal content SEO / AI discoverability contract.
+        $value = array_key_exists('show_toc', $settings) ? $settings['show_toc'] : 1;
         ?>
         <label>
             <input 
@@ -1416,7 +1417,7 @@ class Vernal_Settings {
             />
             <?php _e('Enable Table of Contents on posts and pages', 'vernal-contentum'); ?>
         </label>
-        <p class="description"><?php _e('Automatically generates a table of contents from H2/H3 headings.', 'vernal-contentum'); ?></p>
+        <p class="description"><?php _e('Injects a visual TOC with jump links from HTML H2–H6 headings, plus a JSON-LD ItemList for AI discoverability. Requires real HTML headings in semantic content (not markdown ##). Part of the Vernal SEO contract alongside write-time media/AIOSEO metadata.', 'vernal-contentum'); ?></p>
         <?php
     }
     

@@ -2,13 +2,17 @@
 /**
  * Schema and Table of Contents Handler
  *
- * Vernal owns TOC + heading extraction from semantic content.
- * Article JSON-LD / BreadcrumbList emit only when no supported SEO plugin is active
- * (single schema authority).
+ * Dual SEO contract (content + metadata):
+ * - Content: Machine publishes semantic HTML with real <h2>–<h6> headings.
+ * - Render: Vernal injects visual TOC + heading jump ids; emits JSON-LD ItemList TOC
+ *   for AI discoverability (standalone when AIOSEO owns Article schema).
+ * - Article JSON-LD / BreadcrumbList emit only when no supported SEO plugin is active
+ *   (single Article schema authority).
  *
  * TOC injection rules:
  * - Articles: once via the_content, at the top of the body (guarded against double apply_filters).
  * - Show landings: once via ACF ih_show_summary only — never via the_content.
+ * - show_toc defaults ON when unset (Vernal-managed sites).
  */
 
 if (!defined('ABSPATH')) {
@@ -41,9 +45,23 @@ class Vernal_Schema {
         
         // Add Schema JSON-LD to head (only when Vernal is schema authority)
         add_action('wp_head', array($this, 'add_schema_jsonld'), 10);
+
+        // Standalone TOC ItemList for AI discoverability (works with or without AIOSEO)
+        add_action('wp_head', array($this, 'add_toc_itemlist_jsonld'), 12);
         
         // Add BreadcrumbList schema (only when Vernal is schema authority)
         add_action('wp_head', array($this, 'add_breadcrumb_schema'), 50);
+    }
+
+    /**
+     * TOC enabled unless explicitly disabled in settings.
+     */
+    private function toc_enabled() {
+        $options = get_option('vernal_contentum_settings', array());
+        if (!is_array($options) || !array_key_exists('show_toc', $options)) {
+            return true;
+        }
+        return !empty($options['show_toc']);
     }
 
     /**
@@ -106,8 +124,7 @@ class Vernal_Schema {
             return $content;
         }
         
-        $options = get_option('vernal_contentum_settings', array());
-        if (empty($options['show_toc'])) {
+        if (!$this->toc_enabled()) {
             return $content;
         }
 
@@ -142,8 +159,7 @@ class Vernal_Schema {
         if (!is_string($value) || trim($value) === '') {
             return $value;
         }
-        $options = get_option('vernal_contentum_settings', array());
-        if (empty($options['show_toc'])) {
+        if (!$this->toc_enabled()) {
             return $value;
         }
         if ($this->content_has_vernal_toc($value)) {
@@ -218,6 +234,67 @@ class Vernal_Schema {
     }
     
     /**
+     * Build TOC ItemList elements from semantic headings (≥2 required).
+     *
+     * @return array{0: array, 1: array}|null [itemListElement, articleSection texts]
+     */
+    private function toc_itemlist_parts() {
+        global $post;
+        $semantic = $this->semantic_html($post);
+        $headings = $this->get_headings($semantic);
+        if (count($headings) < 2) {
+            return null;
+        }
+        $itemList = array();
+        foreach ($headings as $i => $h) {
+            $itemList[] = array(
+                "@type" => "ListItem",
+                "position" => $i + 1,
+                "name" => $h['text'],
+                "url" => get_permalink() . "#" . $h['id'],
+            );
+        }
+        $articleSections = array_map(function ($h) {
+            return $h['text'];
+        }, $headings);
+        return array($itemList, $articleSections);
+    }
+
+    /**
+     * Standalone JSON-LD ItemList TOC for AI discoverability.
+     *
+     * Always emitted when TOC is enabled and headings exist — including when AIOSEO
+     * owns Article schema (so we do not nest TOC inside a competing Article block).
+     * When Vernal is Article authority, TOC stays nested under Article.hasPart instead
+     * (see add_schema_jsonld) to avoid duplicate ItemLists.
+     */
+    public function add_toc_itemlist_jsonld() {
+        if (!is_singular() || is_admin()) {
+            return;
+        }
+        if (!$this->toc_enabled()) {
+            return;
+        }
+        // Nested under Article when Vernal owns Article JSON-LD.
+        if ($this->vernal_is_schema_authority()) {
+            return;
+        }
+        $parts = $this->toc_itemlist_parts();
+        if (!$parts) {
+            return;
+        }
+        list($itemList, ) = $parts;
+        $jsonld = array(
+            "@context" => "https://schema.org",
+            "@type" => "ItemList",
+            "@id" => get_permalink() . "#vernal-toc",
+            "name" => "Table of Contents",
+            "itemListElement" => $itemList,
+        );
+        echo '<script type="application/ld+json">' . json_encode($jsonld, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . '</script>';
+    }
+
+    /**
      * Add Schema JSON-LD to head — only when Vernal is schema authority.
      */
     public function add_schema_jsonld() {
@@ -235,26 +312,9 @@ class Vernal_Schema {
         }
         
         global $post;
-        $semantic = $this->semantic_html($post);
-        $headings = $this->get_headings($semantic);
-        
-        if (count($headings) < 2) {
-            return;
-        }
-        
-        $itemList = array();
-        foreach ($headings as $i => $h) {
-            $itemList[] = array(
-                "@type" => "ListItem",
-                "position" => $i + 1,
-                "name" => $h['text'],
-                "url" => get_permalink() . "#" . $h['id']
-            );
-        }
-        
-        $articleSections = array_map(function($h) {
-            return $h['text'];
-        }, $headings);
+        $parts = $this->toc_itemlist_parts();
+        $itemList = $parts ? $parts[0] : array();
+        $articleSections = $parts ? $parts[1] : array();
         
         if (!empty($options['use_site_logo'])) {
             $custom_logo_id = get_theme_mod('custom_logo');
@@ -280,7 +340,8 @@ class Vernal_Schema {
                 "height" => 700,
             );
         }
-        
+
+        $semantic = $this->semantic_html($post);
         $summary_abstract = wp_trim_words(strip_tags($semantic), 40, "...");
         
         $jsonld = array(
@@ -310,15 +371,17 @@ class Vernal_Schema {
             ),
             "description" => get_the_excerpt() ?: $summary_abstract,
             "articleSection" => $articleSections,
-            "hasPart" => array(
+            "keywords" => $keywords
+        );
+        if ($itemList && $this->toc_enabled()) {
+            $jsonld["hasPart"] = array(
                 array(
                     "@type" => "ItemList",
                     "name" => "Table of Contents",
-                    "itemListElement" => $itemList
-                )
-            ),
-            "keywords" => $keywords
-        );
+                    "itemListElement" => $itemList,
+                ),
+            );
+        }
         
         echo '<script type="application/ld+json">' . json_encode($jsonld, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . '</script>';
     }
