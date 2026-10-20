@@ -231,16 +231,37 @@ jobs:
             fi
             ANY_SIBLING=1
             echo "Deploying sibling: $DEST_N"
-            if ! ssh_retry "mkdir -p '$DEST_N' && test -w '$DEST_N'"; then
-              echo "::error::Cannot write $DEST_N"
+            # Prefer direct write; fall back to sudo as the account owner (cPanel).
+            OWNER=$(echo "$DEST_N" | sed -n 's#^/home/\([^/]*\)/.*#\1#p')
+            WRITE_OK=0
+            if ssh_retry "mkdir -p '$DEST_N' && test -w '$DEST_N'"; then
+              WRITE_OK=1
+            elif [ -n "$OWNER" ] && ssh_retry "sudo -n -u '$OWNER' mkdir -p '$DEST_N' && sudo -n -u '$OWNER' test -w '$DEST_N'"; then
+              echo "Using sudo -u $OWNER for $DEST_N"
+              WRITE_OK=2
+            else
+              echo "::error::Cannot write $DEST_N (direct or sudo -u ${OWNER:-?})"
               continue
             fi
-            rsync -avz --delete \
-              --exclude='.git' --exclude='.git/**' --exclude='.github' \
-              --exclude='.gitignore' --exclude='README.md' --exclude='DEPLOYMENT.md' \
-              --exclude='VERSIONING.md' --exclude='TROUBLESHOOTING.md' \
-              --exclude='UPDATE_SYSTEM.md' --exclude='SECRETS_SETUP.md' --exclude='.DS_Store' \
-              ./ "$HOST:$DEST_N/"
+            if [ "$WRITE_OK" = "1" ]; then
+              rsync -avz --delete \
+                --exclude='.git' --exclude='.git/**' --exclude='.github' \
+                --exclude='.gitignore' --exclude='README.md' --exclude='DEPLOYMENT.md' \
+                --exclude='VERSIONING.md' --exclude='TROUBLESHOOTING.md' \
+                --exclude='UPDATE_SYSTEM.md' --exclude='SECRETS_SETUP.md' --exclude='.DS_Store' \
+                ./ "$HOST:$DEST_N/"
+            else
+              # Stage on a writable tmp, then sudo-copy into account tree.
+              STAGE="/tmp/vernal-contentum-stage-$$"
+              ssh_retry "rm -rf '$STAGE' && mkdir -p '$STAGE'"
+              rsync -avz --delete \
+                --exclude='.git' --exclude='.git/**' --exclude='.github' \
+                --exclude='.gitignore' --exclude='README.md' --exclude='DEPLOYMENT.md' \
+                --exclude='VERSIONING.md' --exclude='TROUBLESHOOTING.md' \
+                --exclude='UPDATE_SYSTEM.md' --exclude='SECRETS_SETUP.md' --exclude='.DS_Store' \
+                ./ "$HOST:$STAGE/"
+              ssh_retry "sudo -n bash -lc 'rm -rf \"$DEST_N\"/* && cp -a \"$STAGE\"/. \"$DEST_N\"/ && chown -R \"$OWNER:$OWNER\" \"$DEST_N\" && touch \"$DEST_N/vernal-contentum.php\"' && rm -rf '$STAGE'"
+            fi
             VER_LINE=$(ssh_retry "grep -E '^ \\* Version:' '$DEST_N/vernal-contentum.php' | head -1" || true)
             echo "  on-disk: $VER_LINE"
             ssh_retry "touch '$DEST_N/vernal-contentum.php' '$DEST_N/includes/class-vernal-api.php' 2>/dev/null; true" || true
