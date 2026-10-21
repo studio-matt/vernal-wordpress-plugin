@@ -1240,6 +1240,17 @@ class Vernal_API {
                 if (isset($cols['title'])) {
                     $row['title'] = '';
                 }
+                // Ignore ?fbclid=… etc so social share URLs still match.
+                if (isset($cols['match_data'])) {
+                    $row['match_data'] = wp_json_encode(array(
+                        'source' => array(
+                            'flag_query' => 'ignore',
+                            'flag_case' => false,
+                            'flag_trailing' => false,
+                            'flag_regex' => false,
+                        ),
+                    ));
+                }
                 if ($row_id) {
                     // phpcs:ignore WordPress.DB.DirectDatabaseQuery
                     $ok = $wpdb->update($table, $row, array('id' => (int) $row_id));
