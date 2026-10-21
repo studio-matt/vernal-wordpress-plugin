@@ -1191,46 +1191,72 @@ class Vernal_API {
             ));
             $action_data = $to;
             $now = current_time('mysql');
+            // Discover columns — Redirection schema varies by version.
+            // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+            $col_rows = $wpdb->get_results("SHOW COLUMNS FROM {$table}", ARRAY_A);
+            $cols = array();
+            if (is_array($col_rows)) {
+                foreach ($col_rows as $cr) {
+                    if (!empty($cr['Field'])) {
+                        $cols[$cr['Field']] = true;
+                    }
+                }
+            }
+            $row = array();
+            if (isset($cols['url'])) {
+                $row['url'] = $from;
+            }
+            if (isset($cols['match_url'])) {
+                $row['match_url'] = rtrim($from, '/');
+            }
+            if (isset($cols['regex'])) {
+                $row['regex'] = 0;
+            }
+            if (isset($cols['position'])) {
+                $row['position'] = 0;
+            }
+            if (isset($cols['last_count'])) {
+                $row['last_count'] = 0;
+            }
+            if (isset($cols['group_id'])) {
+                $row['group_id'] = 1;
+            }
+            if (isset($cols['status'])) {
+                $row['status'] = 'enabled';
+            }
+            if (isset($cols['action_type'])) {
+                $row['action_type'] = 'url';
+            }
+            if (isset($cols['action_code'])) {
+                $row['action_code'] = 301;
+            }
+            if (isset($cols['action_data'])) {
+                $row['action_data'] = $action_data;
+            }
+            if (isset($cols['match_type'])) {
+                $row['match_type'] = 'url';
+            }
+            if (isset($cols['title'])) {
+                $row['title'] = '';
+            }
             if ($row_id) {
                 // phpcs:ignore WordPress.DB.DirectDatabaseQuery
-                $wpdb->update(
-                    $table,
-                    array(
-                        'action_type' => 'url',
-                        'action_code' => 301,
-                        'action_data' => $action_data,
-                        'match_type' => 'url',
-                        'status' => 'enabled',
-                        'last_access' => $now,
-                    ),
-                    array('id' => (int) $row_id)
-                );
-                $out['updated']++;
+                $ok = $wpdb->update($table, $row, array('id' => (int) $row_id));
+                if ($ok === false) {
+                    $out['skipped']++;
+                    $out['last_error'] = $wpdb->last_error;
+                } else {
+                    $out['updated']++;
+                }
             } else {
                 // phpcs:ignore WordPress.DB.DirectDatabaseQuery
-                $wpdb->insert(
-                    $table,
-                    array(
-                        'url' => $from,
-                        'match_url' => $from,
-                        'match_data' => null,
-                        'regex' => 0,
-                        'position' => 0,
-                        'last_count' => 0,
-                        'last_access' => '0000-00-00 00:00:00',
-                        'group_id' => 1,
-                        'status' => 'enabled',
-                        'action_type' => 'url',
-                        'action_code' => 301,
-                        'action_data' => $action_data,
-                        'match_type' => 'url',
-                        'title' => '',
-                    )
-                );
-                if ($wpdb->insert_id) {
+                $ok = $wpdb->insert($table, $row);
+                if ($ok && $wpdb->insert_id) {
                     $out['inserted']++;
                 } else {
                     $out['skipped']++;
+                    $out['last_error'] = $wpdb->last_error;
+                    $out['last_query'] = $wpdb->last_query;
                 }
             }
         }
