@@ -48,6 +48,10 @@ class Vernal_Schema {
 
         // Standalone TOC ItemList for AI discoverability (works with or without AIOSEO)
         add_action('wp_head', array($this, 'add_toc_itemlist_jsonld'), 12);
+
+        // Supplemental podcast / FAQ graphs (never duplicate AIOSEO Article/WebPage)
+        add_action('wp_head', array($this, 'add_podcast_episode_jsonld'), 14);
+        add_action('wp_head', array($this, 'add_faqpage_jsonld'), 15);
         
         // Add BreadcrumbList schema (only when Vernal is schema authority)
         add_action('wp_head', array($this, 'add_breadcrumb_schema'), 50);
@@ -423,5 +427,199 @@ class Vernal_Schema {
         );
         
         echo '<script type="application/ld+json">' . json_encode($breadcrumb, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . '</script>';
+    }
+
+    /**
+     * Read ACF/meta string for a post without inventing values.
+     */
+    private function read_field_string($post_id, $key) {
+        $val = '';
+        if (function_exists('get_field')) {
+            $raw = get_field($key, $post_id);
+            if (is_string($raw)) {
+                $val = $raw;
+            } elseif (is_numeric($raw)) {
+                $val = (string) $raw;
+            }
+        }
+        if ($val === '') {
+            $val = (string) get_post_meta($post_id, $key, true);
+        }
+        return trim($val);
+    }
+
+    /**
+     * Supplemental PodcastEpisode graph for show landings (verified data only).
+     * Does not emit Article — AIOSEO owns WebPage/BlogPosting.
+     */
+    public function add_podcast_episode_jsonld() {
+        if (!is_singular() || is_admin()) {
+            return;
+        }
+        global $post;
+        if (!$post) {
+            return;
+        }
+        $post_id = (int) $post->ID;
+        $episode_id = (string) get_post_meta($post_id, 'vernal_episode_id', true);
+        if ($episode_id === '') {
+            return;
+        }
+        if (class_exists('Vernal_Semantic_Content')) {
+            $kind = Vernal_Semantic_Content::get_instance()->detect_kind($post);
+            if ($kind !== 'show_landing') {
+                return;
+            }
+        }
+
+        $permalink = get_permalink($post_id);
+        $name = get_the_title($post_id);
+        $guest = $this->read_field_string($post_id, 'ih_guests_name');
+        if ($guest === '') {
+            $guest = $this->read_field_string($post_id, 'ih_guest_name');
+        }
+        $yt = $this->read_field_string($post_id, 'ih_youtube_link');
+        $show_number = (string) get_post_meta($post_id, 'show_number', true);
+
+        $episode = array(
+            '@context' => 'https://schema.org',
+            '@type' => 'PodcastEpisode',
+            '@id' => $permalink . '#podcast-episode',
+            'url' => $permalink,
+            'name' => $name,
+            'datePublished' => get_the_date('c', $post_id),
+            'partOfSeries' => array(
+                '@type' => 'PodcastSeries',
+                '@id' => home_url('/#podcast-series'),
+                'name' => get_bloginfo('name'),
+                'url' => home_url('/'),
+            ),
+        );
+        if ($show_number !== '' && preg_match('/^\d+$/', $show_number)) {
+            $episode['episodeNumber'] = (int) $show_number;
+        }
+        if ($guest !== '') {
+            $episode['actor'] = array(
+                array(
+                    '@type' => 'Person',
+                    '@id' => $permalink . '#guest',
+                    'name' => $guest,
+                ),
+            );
+        }
+
+        // PowerPress enclosure → AudioObject when present.
+        $enclosure = (string) get_post_meta($post_id, 'enclosure', true);
+        if ($enclosure !== '') {
+            $parts = preg_split('/\n/', $enclosure);
+            $audio_url = isset($parts[0]) ? trim($parts[0]) : '';
+            if ($audio_url && preg_match('#^https?://#i', $audio_url)) {
+                $audio = array(
+                    '@type' => 'AudioObject',
+                    '@id' => $permalink . '#audio',
+                    'contentUrl' => $audio_url,
+                    'url' => $audio_url,
+                );
+                if (isset($parts[1]) && is_numeric(trim($parts[1]))) {
+                    $audio['contentSize'] = trim($parts[1]);
+                }
+                $episode['associatedMedia'] = $audio;
+            }
+        }
+
+        if ($yt !== '' && preg_match('#^https?://#i', $yt)) {
+            $episode['video'] = array(
+                '@type' => 'VideoObject',
+                '@id' => $permalink . '#video',
+                'name' => $name,
+                'url' => $yt,
+                'embedUrl' => $yt,
+                'uploadDate' => get_the_date('c', $post_id),
+            );
+        }
+
+        echo '<script type="application/ld+json">' . wp_json_encode($episode, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . '</script>';
+    }
+
+    /**
+     * FAQPage only when visible FAQ markup exists and no other FAQ schema is present.
+     */
+    public function add_faqpage_jsonld() {
+        if (!is_singular() || is_admin()) {
+            return;
+        }
+        global $post;
+        if (!$post) {
+            return;
+        }
+        $post_id = (int) $post->ID;
+        // Do not emit when AIOSEO (or similar) already owns FAQ schema for this post.
+        $aioseo_schema = get_post_meta($post_id, '_aioseo_schema', true);
+        if (is_string($aioseo_schema) && stripos($aioseo_schema, 'FAQPage') !== false) {
+            return;
+        }
+        if (is_array($aioseo_schema) && stripos(wp_json_encode($aioseo_schema), 'FAQPage') !== false) {
+            return;
+        }
+        $html = $this->semantic_html($post);
+        if (!is_string($html) || $html === '') {
+            return;
+        }
+        // Require an explicit FAQ region — do not manufacture from arbitrary H2s.
+        $eligible = (
+            stripos($html, 'vernal-faq') !== false
+            || preg_match('/<h2[^>]*>\s*FAQ/i', $html)
+            || preg_match('/<h2[^>]*>\s*Frequently asked/i', $html)
+            || preg_match('/class=["\'][^"\']*faq/i', $html)
+        );
+        if (!$eligible) {
+            return;
+        }
+        $pairs = array();
+        if (preg_match_all(
+            '/<(?:h[2-4]|strong|b|dt)[^>]*>\s*(?:Q(?:uestion)?[:.]?\s*)?([^<]{8,180})\s*<\/(?:h[2-4]|strong|b|dt)>\s*<(?:p|dd)[^>]*>(.*?)<\/(?:p|dd)>/is',
+            $html,
+            $m,
+            PREG_SET_ORDER
+        )) {
+            foreach ($m as $row) {
+                $q = trim(wp_strip_all_tags($row[1]));
+                $a = trim(wp_strip_all_tags($row[2]));
+                if ($q === '' || $a === '') {
+                    continue;
+                }
+                if (preg_match('/^(FAQ|Frequently asked)/i', $q)) {
+                    continue;
+                }
+                if (!preg_match('/\?$/', $q) && stripos($q, 'faq') === false) {
+                    continue;
+                }
+                $pairs[] = array($q, $a);
+                if (count($pairs) >= 12) {
+                    break;
+                }
+            }
+        }
+        if (count($pairs) < 2) {
+            return;
+        }
+        $main = array();
+        foreach ($pairs as $i => $qa) {
+            $main[] = array(
+                '@type' => 'Question',
+                'name' => $qa[0],
+                'acceptedAnswer' => array(
+                    '@type' => 'Answer',
+                    'text' => $qa[1],
+                ),
+            );
+        }
+        $faq = array(
+            '@context' => 'https://schema.org',
+            '@type' => 'FAQPage',
+            '@id' => get_permalink() . '#faq',
+            'mainEntity' => $main,
+        );
+        echo '<script type="application/ld+json">' . wp_json_encode($faq, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . '</script>';
     }
 }

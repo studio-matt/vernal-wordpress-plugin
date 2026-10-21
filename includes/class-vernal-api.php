@@ -695,7 +695,7 @@ class Vernal_API {
                 $resolved['url'],
                 $resolved['seo'],
                 array(
-                    'role' => 'cover',
+                    'role' => $this->resolve_featured_media_role($params),
                     'episode_id' => $this->extract_vernal_episode_id($params),
                 )
             );
@@ -1044,7 +1044,7 @@ class Vernal_API {
                 $resolved['url'],
                 $resolved['seo'],
                 array(
-                    'role' => 'cover',
+                    'role' => $this->resolve_featured_media_role($params),
                     'episode_id' => $this->extract_vernal_episode_id($params),
                 )
             );
@@ -2215,6 +2215,7 @@ class Vernal_API {
                     // Structured gallery item: { url, title, alt, caption, description }
                     $url = '';
                     $seo = array();
+                    $ownership = array();
                     if (is_array($item)) {
                         $url = isset($item['url']) ? esc_url_raw(trim((string) $item['url'])) : '';
                         $seo = $this->normalize_image_seo_meta(
@@ -2222,11 +2223,25 @@ class Vernal_API {
                                 ? $item['image_seo']
                                 : $item
                         );
+                        $role = isset($item['role']) ? sanitize_key((string) $item['role']) : '';
+                        if ($role === '') {
+                            if ($target_key === 'ih_show_gallery' || $target_key === 'field_ih_show_gallery') {
+                                $role = 'gallery';
+                            } elseif (in_array($target_key, array('ih_partner_gallery', 'field_ih_partner_gallery', 'partner_gallery'), true)) {
+                                $role = 'partner_gallery';
+                            }
+                        }
+                        if ($role !== '') {
+                            $ownership['role'] = $role;
+                        }
+                        if (!empty($item['source_identity'])) {
+                            $ownership['episode_id'] = sanitize_text_field((string) $item['source_identity']);
+                        }
                     } elseif (is_string($item)) {
                         $url = esc_url_raw(trim($item));
                     }
                     if ($url && preg_match('#^https?://#i', $url)) {
-                        $att = $this->sideload_image_attachment($post_id, $url, $seo);
+                        $att = $this->sideload_image_attachment($post_id, $url, $seo, $ownership);
                         if ($att) {
                             $ids[] = $att;
                         }
@@ -2253,6 +2268,7 @@ class Vernal_API {
                 }
                 $url = '';
                 $seo = array();
+                $ownership = array();
                 if (is_array($value)) {
                     $url = isset($value['url']) ? esc_url_raw(trim((string) $value['url'])) : '';
                     $seo = $this->normalize_image_seo_meta(
@@ -2260,11 +2276,25 @@ class Vernal_API {
                             ? $value['image_seo']
                             : $value
                     );
+                    $role = isset($value['role']) ? sanitize_key((string) $value['role']) : '';
+                    if ($role === '') {
+                        if ($target_key === 'ih_guest_headshot' || $target_key === 'ih_guest_headshot_url') {
+                            $role = 'headshot';
+                        } elseif ($target_key === 'ih_partner_company_logo') {
+                            $role = 'partner_logo';
+                        }
+                    }
+                    if ($role !== '') {
+                        $ownership['role'] = $role;
+                    }
+                    if (!empty($value['source_identity'])) {
+                        $ownership['episode_id'] = sanitize_text_field((string) $value['source_identity']);
+                    }
                 } elseif (is_string($value)) {
                     $url = esc_url_raw(trim($value));
                 }
                 if ($url && preg_match('#^https?://#i', $url)) {
-                    $att = $this->sideload_image_attachment($post_id, $url, $seo);
+                    $att = $this->sideload_image_attachment($post_id, $url, $seo, $ownership);
                     if ($att) {
                         $this->set_acf_or_meta($post_id, $target_key, $att);
                     }
@@ -2434,6 +2464,36 @@ class Vernal_API {
             return sanitize_text_field((string) $params['vernal_episode_id']);
         }
         return '';
+    }
+
+    /**
+     * Featured media role for ownership stamps.
+     * Partner landings use partner_featured; show/article covers use cover.
+     *
+     * @param array $params
+     * @return string
+     */
+    private function resolve_featured_media_role($params) {
+        if (!empty($params['featured_image']) && is_array($params['featured_image']) && !empty($params['featured_image']['role'])) {
+            return sanitize_key((string) $params['featured_image']['role']);
+        }
+        if (!empty($params['meta']) && is_array($params['meta'])) {
+            if (!empty($params['meta']['vernal_partner_id']) || !empty($params['meta']['vernal_content_kind']) && $params['meta']['vernal_content_kind'] === 'partner') {
+                return 'partner_featured';
+            }
+            if (!empty($params['meta']['vernal_episode_id'])) {
+                return 'cover';
+            }
+        }
+        if (!empty($params['acf']) && is_array($params['acf'])) {
+            if (isset($params['acf']['ih_partner_company_logo']) || isset($params['acf']['ih_partner_gallery'])) {
+                return 'partner_featured';
+            }
+            if (isset($params['acf']['ih_guests_name']) || isset($params['acf']['ih_show_summary'])) {
+                return 'cover';
+            }
+        }
+        return 'cover';
     }
 
     /**

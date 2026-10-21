@@ -132,16 +132,24 @@ class Vernal_SEO_Adapter {
         $social = $has_social ? $seo['social'] : array();
         $og_title = '';
         $og_desc = '';
+        $og_image = '';
         if ($has_social) {
             $og_title = !empty($social['title']) ? wp_strip_all_tags((string) $social['title']) : $title;
             $og_desc = !empty($social['description'])
                 ? wp_strip_all_tags((string) $social['description'])
                 : $description;
+            if (!empty($social['image'])) {
+                $og_image = esc_url_raw((string) $social['image']);
+            }
         } elseif ($has_title) {
             $og_title = $title;
             $og_desc = $description;
         }
-        $canonical = $has_canonical ? esc_url_raw((string) $seo['canonical_url']) : '';
+        // Only write canonical when explicitly supplied (non-empty). Empty/absent → AIOSEO self-ref.
+        $canonical = '';
+        if ($has_canonical && trim((string) $seo['canonical_url']) !== '') {
+            $canonical = esc_url_raw((string) $seo['canonical_url']);
+        }
 
         // Prefer AIOSEO model API when available
         if (class_exists('\AIOSEO\Plugin\Common\Models\Post')) {
@@ -160,7 +168,23 @@ class Vernal_SEO_Adapter {
                     if ($og_desc !== '') {
                         $aioseo_post->og_description = $og_desc;
                     }
-                    if ($has_canonical && $canonical !== '') {
+                    if ($og_image !== '') {
+                        // Custom image — avoid duplicating tags; AIOSEO owns emission.
+                        $aioseo_post->og_image_type = 'custom';
+                        $aioseo_post->og_image_custom_url = $og_image;
+                        $aioseo_post->twitter_image_type = 'custom';
+                        $aioseo_post->twitter_image_custom_url = $og_image;
+                        if (property_exists($aioseo_post, 'twitter_use_og')) {
+                            $aioseo_post->twitter_use_og = false;
+                        }
+                        if ($og_title !== '' && property_exists($aioseo_post, 'twitter_title')) {
+                            $aioseo_post->twitter_title = $og_title;
+                        }
+                        if ($og_desc !== '' && property_exists($aioseo_post, 'twitter_description')) {
+                            $aioseo_post->twitter_description = $og_desc;
+                        }
+                    }
+                    if ($canonical !== '') {
                         $aioseo_post->canonical_url = $canonical;
                     }
                     if ($has_primary && $primary !== '') {
@@ -256,6 +280,12 @@ class Vernal_SEO_Adapter {
         }
         if ($og_desc !== '') {
             $data['og_description'] = $og_desc;
+        }
+        if ($og_image !== '') {
+            $data['og_image_type'] = 'custom';
+            $data['og_image_custom_url'] = $og_image;
+            $data['twitter_image_type'] = 'custom';
+            $data['twitter_image_custom_url'] = $og_image;
         }
         if ($canonical !== '') {
             $data['canonical_url'] = $canonical;

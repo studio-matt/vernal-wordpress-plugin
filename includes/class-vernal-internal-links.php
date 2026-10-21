@@ -869,21 +869,22 @@ class Vernal_Internal_Links {
                 return false;
             }
         }
+        $kind = '';
         if (class_exists('Vernal_Semantic_Content')) {
             $kind = Vernal_Semantic_Content::get_instance()->detect_kind($post);
-            if ($kind === 'show_landing') {
-                return false;
-            }
-        } else {
-            if (get_post_meta($post->ID, 'vernal_episode_id', true)) {
-                return false;
-            }
+        } elseif (get_post_meta($post->ID, 'vernal_episode_id', true)) {
+            $kind = 'show_landing';
         }
         $permalink = get_permalink($post);
         if (!$permalink || is_wp_error($permalink)) {
             return false;
         }
-        $words = str_word_count(wp_strip_all_tags($post->post_content));
+        // Show landings: semantic body is ACF summary (post_content is often &nbsp;).
+        $body_html = $post->post_content;
+        if ($kind === 'show_landing' && class_exists('Vernal_Semantic_Content')) {
+            $body_html = Vernal_Semantic_Content::get_instance()->get_wp_semantic_content($post);
+        }
+        $words = str_word_count(wp_strip_all_tags($body_html));
         if ($words < (int) $settings['min_word_count']) {
             return false;
         }
