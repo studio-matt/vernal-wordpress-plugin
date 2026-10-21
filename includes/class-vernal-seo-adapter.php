@@ -172,10 +172,18 @@ class Vernal_SEO_Adapter {
                         // Custom image — avoid duplicating tags; AIOSEO owns emission.
                         $aioseo_post->og_image_type = 'custom';
                         $aioseo_post->og_image_custom_url = $og_image;
+                        // Some AIOSEO builds also read og_image_url for custom emission.
+                        if (property_exists($aioseo_post, 'og_image_url')) {
+                            $aioseo_post->og_image_url = $og_image;
+                        }
                         $aioseo_post->twitter_image_type = 'custom';
                         $aioseo_post->twitter_image_custom_url = $og_image;
+                        if (property_exists($aioseo_post, 'twitter_image_url')) {
+                            $aioseo_post->twitter_image_url = $og_image;
+                        }
                         if (property_exists($aioseo_post, 'twitter_use_og')) {
-                            $aioseo_post->twitter_use_og = false;
+                            // Prefer OG image for Twitter when custom is set.
+                            $aioseo_post->twitter_use_og = true;
                         }
                         if ($og_title !== '' && property_exists($aioseo_post, 'twitter_title')) {
                             $aioseo_post->twitter_title = $og_title;
@@ -206,6 +214,11 @@ class Vernal_SEO_Adapter {
                         $aioseo_post->keyphrases = wp_json_encode($keyphrases);
                     }
                     $aioseo_post->save();
+                    // Dual-write social image columns — Models::save() can omit custom
+                    // image fields on some AIOSEO versions while still returning success.
+                    if ($og_image !== '') {
+                        $this->write_aioseo_social_image($post_id, $og_image);
+                    }
                     return;
                 }
             } catch (Exception $e) {
@@ -235,6 +248,9 @@ class Vernal_SEO_Adapter {
             $wpdb->esc_like($table)
         ));
         if ($exists !== $table) {
+            if ($og_image !== '') {
+                $this->write_aioseo_social_image($post_id, $og_image);
+            }
             return;
         }
 
@@ -286,6 +302,7 @@ class Vernal_SEO_Adapter {
             $data['og_image_custom_url'] = $og_image;
             $data['twitter_image_type'] = 'custom';
             $data['twitter_image_custom_url'] = $og_image;
+            $data['twitter_use_og'] = 1;
         }
         if ($canonical !== '') {
             $data['canonical_url'] = $canonical;
@@ -298,6 +315,56 @@ class Vernal_SEO_Adapter {
             // phpcs:ignore WordPress.DB.DirectDatabaseQuery
             $wpdb->update($table, $data, array('id' => (int) $row_id));
         } else {
+            $data['created'] = $now;
+            // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+            $wpdb->insert($table, $data);
+        }
+        if ($og_image !== '') {
+            $this->write_aioseo_social_image($post_id, $og_image);
+        }
+    }
+
+    /**
+     * Persist custom OG/Twitter image URLs on aioseo_posts (and safe meta mirrors).
+     */
+    private function write_aioseo_social_image($post_id, $image_url) {
+        $post_id = (int) $post_id;
+        $image_url = esc_url_raw((string) $image_url);
+        if ($post_id <= 0 || $image_url === '') {
+            return;
+        }
+        update_post_meta($post_id, '_aioseo_og_image_custom_url', $image_url);
+        update_post_meta($post_id, '_aioseo_twitter_image_custom_url', $image_url);
+
+        global $wpdb;
+        $table = $wpdb->prefix . 'aioseo_posts';
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+        $exists = $wpdb->get_var($wpdb->prepare(
+            "SHOW TABLES LIKE %s",
+            $wpdb->esc_like($table)
+        ));
+        if ($exists !== $table) {
+            return;
+        }
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+        $row_id = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$table} WHERE post_id = %d",
+            $post_id
+        ));
+        $now = current_time('mysql');
+        $data = array(
+            'og_image_type' => 'custom',
+            'og_image_custom_url' => $image_url,
+            'twitter_image_type' => 'custom',
+            'twitter_image_custom_url' => $image_url,
+            'twitter_use_og' => 1,
+            'updated' => $now,
+        );
+        if ($row_id) {
+            // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+            $wpdb->update($table, $data, array('id' => (int) $row_id));
+        } else {
+            $data['post_id'] = $post_id;
             $data['created'] = $now;
             // phpcs:ignore WordPress.DB.DirectDatabaseQuery
             $wpdb->insert($table, $data);
