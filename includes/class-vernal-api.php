@@ -1176,21 +1176,15 @@ class Vernal_API {
             if ($from === '' || $from[0] !== '/') {
                 $from = '/' . ltrim($from, '/');
             }
-            if (substr($from, -1) !== '/') {
-                $from .= '/';
-            }
             $to = esc_url_raw($to);
             if ($to === '' || !preg_match('#^https?://#i', $to)) {
                 $out['skipped']++;
                 continue;
             }
-            // phpcs:ignore WordPress.DB.DirectDatabaseQuery
-            $row_id = $wpdb->get_var($wpdb->prepare(
-                "SELECT id FROM {$table} WHERE url = %s LIMIT 1",
-                $from
-            ));
-            $action_data = $to;
-            $now = current_time('mysql');
+            // Cover both slash variants — FB often omits the trailing slash.
+            $from_variants = array(rtrim($from, '/'), rtrim($from, '/') . '/');
+            $from_variants = array_values(array_unique($from_variants));
+
             // Discover columns — Redirection schema varies by version.
             // phpcs:ignore WordPress.DB.DirectDatabaseQuery
             $col_rows = $wpdb->get_results("SHOW COLUMNS FROM {$table}", ARRAY_A);
@@ -1202,61 +1196,69 @@ class Vernal_API {
                     }
                 }
             }
-            $row = array();
-            if (isset($cols['url'])) {
-                $row['url'] = $from;
-            }
-            if (isset($cols['match_url'])) {
-                $row['match_url'] = rtrim($from, '/');
-            }
-            if (isset($cols['regex'])) {
-                $row['regex'] = 0;
-            }
-            if (isset($cols['position'])) {
-                $row['position'] = 0;
-            }
-            if (isset($cols['last_count'])) {
-                $row['last_count'] = 0;
-            }
-            if (isset($cols['group_id'])) {
-                $row['group_id'] = 1;
-            }
-            if (isset($cols['status'])) {
-                $row['status'] = 'enabled';
-            }
-            if (isset($cols['action_type'])) {
-                $row['action_type'] = 'url';
-            }
-            if (isset($cols['action_code'])) {
-                $row['action_code'] = 301;
-            }
-            if (isset($cols['action_data'])) {
-                $row['action_data'] = $action_data;
-            }
-            if (isset($cols['match_type'])) {
-                $row['match_type'] = 'url';
-            }
-            if (isset($cols['title'])) {
-                $row['title'] = '';
-            }
-            if ($row_id) {
+
+            foreach ($from_variants as $from_one) {
                 // phpcs:ignore WordPress.DB.DirectDatabaseQuery
-                $ok = $wpdb->update($table, $row, array('id' => (int) $row_id));
-                if ($ok === false) {
-                    $out['skipped']++;
-                    $out['last_error'] = $wpdb->last_error;
-                } else {
-                    $out['updated']++;
+                $row_id = $wpdb->get_var($wpdb->prepare(
+                    "SELECT id FROM {$table} WHERE url = %s LIMIT 1",
+                    $from_one
+                ));
+                $row = array();
+                if (isset($cols['url'])) {
+                    $row['url'] = $from_one;
                 }
-            } else {
-                // phpcs:ignore WordPress.DB.DirectDatabaseQuery
-                $ok = $wpdb->insert($table, $row);
-                if ($ok && $wpdb->insert_id) {
-                    $out['inserted']++;
+                if (isset($cols['match_url'])) {
+                    $row['match_url'] = rtrim($from_one, '/');
+                }
+                if (isset($cols['regex'])) {
+                    $row['regex'] = 0;
+                }
+                if (isset($cols['position'])) {
+                    $row['position'] = 0;
+                }
+                if (isset($cols['last_count'])) {
+                    $row['last_count'] = 0;
+                }
+                if (isset($cols['group_id'])) {
+                    $row['group_id'] = 1;
+                }
+                if (isset($cols['status'])) {
+                    $row['status'] = 'enabled';
+                }
+                if (isset($cols['action_type'])) {
+                    $row['action_type'] = 'url';
+                }
+                if (isset($cols['action_code'])) {
+                    $row['action_code'] = 301;
+                }
+                if (isset($cols['action_data'])) {
+                    $row['action_data'] = $to;
+                }
+                if (isset($cols['match_type'])) {
+                    $row['match_type'] = 'url';
+                }
+                if (isset($cols['title'])) {
+                    $row['title'] = '';
+                }
+                if ($row_id) {
+                    // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+                    $ok = $wpdb->update($table, $row, array('id' => (int) $row_id));
+                    if ($ok === false) {
+                        $out['skipped']++;
+                        $out['last_error'] = $wpdb->last_error;
+                    } else {
+                        $out['updated']++;
+                    }
                 } else {
-                    $out['skipped']++;
-                    $out['last_error'] = $wpdb->last_error;
-                    $out['last_query'] = $wpdb->last_query;
+                    // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+                    $ok = $wpdb->insert($table, $row);
+                    if ($ok && $wpdb->insert_id) {
+                        $out['inserted']++;
+                    } else {
+                        $out['skipped']++;
+                        $out['last_error'] = $wpdb->last_error;
+                        $out['last_query'] = $wpdb->last_query;
+                    }
                 }
             }
         }
