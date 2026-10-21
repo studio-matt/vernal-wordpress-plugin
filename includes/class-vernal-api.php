@@ -949,6 +949,14 @@ class Vernal_API {
                 $post = get_post($post_id);
             }
         }
+        // Explicit 301 aliases (e.g. misspelled social share URLs) via Redirection table.
+        $redirect_add = null;
+        if (!empty($params['add_redirects']) && is_array($params['add_redirects'])) {
+            $redirect_add = $this->ensure_permalink_redirects($params['add_redirects']);
+            if (!empty($redirect_add['inserted']) || !empty($redirect_add['updated'])) {
+                $updated_keys[] = 'add_redirects';
+            }
+        }
         // Drop stale Redirection rows that 404 the landing after a guest/title rename.
         $redirect_clear = null;
         if (!empty($params['clear_redirects']) || $slug_changed_from !== '') {
@@ -1120,8 +1128,113 @@ class Vernal_API {
                 'gallery_debug' => $this->debug_partner_gallery($post_id),
                 'cache_purge' => $cache_purge,
                 'redirect_clear' => $redirect_clear,
+                'redirect_add' => $redirect_add,
             ),
         ));
+    }
+
+    /**
+     * Upsert Redirection plugin 301s. Each item: {from: "/old-slug/", to: "https://…/new/"}.
+     *
+     * @param array $items
+     * @return array{inserted:int,updated:int,skipped:int,table:?string}
+     */
+    private function ensure_permalink_redirects($items) {
+        $out = array(
+            'inserted' => 0,
+            'updated' => 0,
+            'skipped' => 0,
+            'table' => null,
+        );
+        if (!is_array($items) || empty($items)) {
+            return $out;
+        }
+        global $wpdb;
+        $table = $wpdb->prefix . 'redirection_items';
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+        if ($exists !== $table) {
+            return $out;
+        }
+        $out['table'] = $table;
+        foreach ($items as $item) {
+            if (!is_array($item)) {
+                $out['skipped']++;
+                continue;
+            }
+            $from = isset($item['from']) ? (string) $item['from'] : '';
+            $to = isset($item['to']) ? (string) $item['to'] : '';
+            if ($from === '' || $to === '') {
+                $out['skipped']++;
+                continue;
+            }
+            // Normalize source to leading-slash path (Redirection style).
+            if (preg_match('#^https?://#i', $from)) {
+                $parts = wp_parse_url($from);
+                $from = isset($parts['path']) ? (string) $parts['path'] : '/';
+            }
+            if ($from === '' || $from[0] !== '/') {
+                $from = '/' . ltrim($from, '/');
+            }
+            if (substr($from, -1) !== '/') {
+                $from .= '/';
+            }
+            $to = esc_url_raw($to);
+            if ($to === '' || !preg_match('#^https?://#i', $to)) {
+                $out['skipped']++;
+                continue;
+            }
+            // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+            $row_id = $wpdb->get_var($wpdb->prepare(
+                "SELECT id FROM {$table} WHERE url = %s LIMIT 1",
+                $from
+            ));
+            $action_data = $to;
+            $now = current_time('mysql');
+            if ($row_id) {
+                // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+                $wpdb->update(
+                    $table,
+                    array(
+                        'action_type' => 'url',
+                        'action_code' => 301,
+                        'action_data' => $action_data,
+                        'match_type' => 'url',
+                        'status' => 'enabled',
+                        'last_access' => $now,
+                    ),
+                    array('id' => (int) $row_id)
+                );
+                $out['updated']++;
+            } else {
+                // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+                $wpdb->insert(
+                    $table,
+                    array(
+                        'url' => $from,
+                        'match_url' => $from,
+                        'match_data' => null,
+                        'regex' => 0,
+                        'position' => 0,
+                        'last_count' => 0,
+                        'last_access' => '0000-00-00 00:00:00',
+                        'group_id' => 1,
+                        'status' => 'enabled',
+                        'action_type' => 'url',
+                        'action_code' => 301,
+                        'action_data' => $action_data,
+                        'match_type' => 'url',
+                        'title' => '',
+                    )
+                );
+                if ($wpdb->insert_id) {
+                    $out['inserted']++;
+                } else {
+                    $out['skipped']++;
+                }
+            }
+        }
+        return $out;
     }
 
     /**
