@@ -3,12 +3,12 @@
  * Plugin Name: Vernal Contentum Bridge
  * Plugin URI: https://vernalcontentum.com
  * Description: Bridge between WordPress and Vernal Contentum web app for content creation and management
- * Version: 1.5.28
+ * Version: 1.5.29
  * Author: Vernal Contentum
  * License: GPL v2 or later
  * Text Domain: vernal-contentum
  *
- * Last updated: Dual SEO contract — write-time media/AIOSEO + render-time TOC/JSON-LD ItemList.
+ * Last updated: Additive ExtractionSnapshot export routes for Website re-creation (no packaging).
  */
 
 // Exit if accessed directly
@@ -17,7 +17,7 @@ if (!defined('ABSPATH')) {
 }
 
 // Define plugin constants
-define('VERNAL_CONTENTUM_VERSION', '1.5.28');
+define('VERNAL_CONTENTUM_VERSION', '1.5.29');
 define('VERNAL_CONTENTUM_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('VERNAL_CONTENTUM_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('VERNAL_CONTENTUM_PLUGIN_BASENAME', plugin_basename(__FILE__));
@@ -78,6 +78,7 @@ require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-semantic-conte
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-seo-adapter.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-show-order.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-api.php';
+require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-export.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-backend-api.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-sitemap.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-schema.php';

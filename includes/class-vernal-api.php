@@ -24,6 +24,11 @@ class Vernal_API {
     
     public function register_routes() {
         $namespace = 'vernal-contentum/v1';
+
+        // Site extraction (additive; never packages destination runtime)
+        if (class_exists('Vernal_Export')) {
+            Vernal_Export::register_routes();
+        }
         
         // Sitemap endpoint
         register_rest_route($namespace, '/sitemap', array(
