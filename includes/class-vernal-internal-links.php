@@ -1695,6 +1695,18 @@ class Vernal_Internal_Links {
         $cats = wp_get_post_categories($post->ID);
         list($primary_kp, $secondary_kp) = $this->post_seo_keyphrases($post);
         $insertable = Vernal_Internal_Link_Inserter::insertable_plain_text($post->post_content);
+        // Builders / filters: raw post_content can be thin while the_content is full.
+        // Prefer insertable text the inserter can wrap; fall back to filtered body
+        // when raw yields almost nothing (otherwise Machine returns gated_empty).
+        if (str_word_count($insertable) < 80 && function_exists('apply_filters')) {
+            $rendered = apply_filters('the_content', $post->post_content);
+            if (is_string($rendered) && $rendered !== '') {
+                $from_rendered = Vernal_Internal_Link_Inserter::insertable_plain_text($rendered);
+                if (str_word_count($from_rendered) > str_word_count($insertable)) {
+                    $insertable = $from_rendered;
+                }
+            }
+        }
         return array(
             'wp_post_id'            => (int) $post->ID,
             'title'                 => get_the_title($post),
