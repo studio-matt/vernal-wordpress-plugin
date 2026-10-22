@@ -431,31 +431,25 @@ class Vernal_Settings {
         $backend_url = defined('VERNAL_BACKEND_URL') ? VERNAL_BACKEND_URL : (isset($settings['backend_url']) ? $settings['backend_url'] : '');
         $backend_api_key = defined('VERNAL_BACKEND_API_KEY') ? VERNAL_BACKEND_API_KEY : (isset($settings['backend_api_key']) ? $settings['backend_api_key'] : '');
         
-        // Fetch scheduled posts from backend
+        // Fetch scheduled posts from backend (plugin key → /plugin/scheduled-posts;
+        // dashboard GET /scheduled-posts is JWT-only and 401s with X-API-Key).
         $scheduled_posts = array();
         $error_message = '';
         
-        if (!empty($backend_url) && !empty($backend_api_key)) {
-            $api_url = trailingslashit($backend_url) . 'scheduled-posts';
-            $response = wp_remote_get($api_url, array(
-                'headers' => array(
-                    'X-API-Key' => $backend_api_key,
-                    'Content-Type' => 'application/json',
-                ),
+        if (!empty($backend_url) && !empty($backend_api_key) && class_exists('Vernal_Backend_API')) {
+            $data = Vernal_Backend_API::request('plugin/scheduled-posts', array(
+                'method'  => 'GET',
                 'timeout' => 30,
             ));
             
-            if (!is_wp_error($response)) {
-                $body = wp_remote_retrieve_body($response);
-                $data = json_decode($body, true);
-                
+            if (!is_wp_error($data)) {
                 if (isset($data['status']) && $data['status'] === 'success' && isset($data['message']['posts'])) {
                     $scheduled_posts = $data['message']['posts'];
                 } else {
                     $error_message = __('Failed to fetch scheduled posts. Please check your backend connection settings.', 'vernal-contentum');
                 }
             } else {
-                $error_message = __('Error connecting to backend: ', 'vernal-contentum') . $response->get_error_message();
+                $error_message = __('Error connecting to backend: ', 'vernal-contentum') . $data->get_error_message();
             }
         } else {
             $error_message = __('Backend API URL and API Key must be configured to view scheduled content.', 'vernal-contentum');
