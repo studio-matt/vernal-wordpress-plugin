@@ -746,7 +746,9 @@ class Vernal_Internal_Links {
                 if (!empty($result['note'])) {
                     $note($summary, sprintf('#%d %s: %s', (int) $post->ID, get_the_title($post), $result['note']));
                 }
-                if (empty($result['errors'])) {
+                // transient_failure (Machine blip) must remain retryable — do not stamp.
+                $disposition = isset($result['disposition']) ? (string) $result['disposition'] : '';
+                if ($disposition !== 'transient_failure' && empty($result['errors'])) {
                     $this->stamp_source_pass($post->ID, !empty($result['linked']));
                 }
 
@@ -1040,6 +1042,9 @@ class Vernal_Internal_Links {
             'errors'       => 0,
             'skip_reasons' => array(),
             'note'         => '',
+            // Durable outcome for cert / retry semantics (see process_source_for_api).
+            'disposition'  => 'permanent_failure',
+            'inserted_edges' => array(),
             'semantic_targets_found' => 0,
             'semantic_targets_rejected' => 0,
             'grounding_attempted' => 0,
@@ -1074,6 +1079,7 @@ class Vernal_Internal_Links {
         if ($analysis['vernal'] >= $max_vernal || $analysis['total'] >= $max_total) {
             $bump('already_at_link_cap');
             $out['duplicate_or_existing_edge']++;
+            $out['disposition'] = 'already_linked';
             $this->refresh_graph_stats_for_post($post->ID, false);
             return $out;
         }
@@ -1086,6 +1092,7 @@ class Vernal_Internal_Links {
         );
         if ($room < 1) {
             $bump('already_at_link_cap');
+            $out['disposition'] = 'already_linked';
             $this->refresh_graph_stats_for_post($post->ID, false);
             return $out;
         }
@@ -1141,7 +1148,8 @@ class Vernal_Internal_Links {
                 $out['machine_request_failed']++;
                 $bump('machine_request_failed');
                 $out['note'] = 'machine_error: ' . $resp->get_error_message();
-                // Transient Machine blips (deploy / 429) — do not burn remaining room.
+                $out['disposition'] = 'transient_failure';
+                // Transient Machine blips (deploy / 429) — do not stamp; remain retryable.
                 break;
             }
             $results = isset($resp['results']) && is_array($resp['results']) ? $resp['results'] : array();
@@ -1152,12 +1160,15 @@ class Vernal_Internal_Links {
                     if ($diag === 'gated_empty') {
                         $bump('gated_empty');
                         $out['note'] = 'Match pool existed but gates/score left no usable edge';
+                        $out['disposition'] = 'no_grounded_anchor';
                     } elseif ($diag === 'no_grounded_anchor') {
                         $bump('no_grounded_anchor');
                         $out['note'] = 'Related targets existed but no usable link phrase in the article body';
+                        $out['disposition'] = 'no_grounded_anchor';
                     } else {
                         $bump('no_machine_candidates');
                         $out['note'] = 'Machine returned no candidates (empty index or no related articles)';
+                        $out['disposition'] = 'no_grounded_anchor';
                     }
                     $saw_empty_machine = true;
                 }
@@ -1316,6 +1327,15 @@ class Vernal_Internal_Links {
             $inserted_this_pass++;
             $out['linked']++;
             $out['note'] = '';
+            $out['inserted_edges'][] = array(
+                'source_wp_post_id' => (int) $post->ID,
+                'target_wp_post_id' => (int) $target_id,
+                'target_url'        => $permalink,
+                'anchor'            => $phrase,
+                'mutation_id'       => $mutation_id,
+                'link_score'        => $score,
+            );
+            $out['disposition'] = 'inserted';
         }
 
         if ($inserted_this_pass > 0) {
@@ -1324,14 +1344,108 @@ class Vernal_Internal_Links {
             foreach (array_unique($mutated_targets) as $tid) {
                 $this->bump_inbound_cache((int) $tid);
             }
+            $out['disposition'] = 'inserted';
         } else {
             $this->refresh_graph_stats_for_post($post->ID, false);
             if ($out['note'] === '' && $out['skipped'] > 0) {
                 $keys = array_keys($out['skip_reasons']);
                 $out['note'] = $keys ? (string) $keys[0] : 'skipped';
             }
+            if (($out['disposition'] ?? '') === 'permanent_failure') {
+                if (!empty($out['skip_reasons']['no_grounded_anchor']) || !empty($out['skip_reasons']['gated_empty'])) {
+                    $out['disposition'] = 'no_grounded_anchor';
+                } elseif (!empty($out['skip_reasons']['duplicate_or_existing_edge']) || !empty($out['skip_reasons']['already_at_link_cap'])) {
+                    $out['disposition'] = 'already_linked';
+                }
+            }
         }
         return $out;
+    }
+
+    /**
+     * Process one source synchronously (cert / ops). Does not require the batch lock
+     * when the caller already cleared a stuck run — uses a short exclusive stamp.
+     *
+     * @param int $post_id
+     * @return array
+     */
+    public function process_source_for_api($post_id) {
+        $post_id = (int) $post_id;
+        $settings = self::get_settings();
+        if (empty($settings['enabled'])) {
+            return array('ok' => false, 'disposition' => 'permanent_failure', 'reason' => 'disabled');
+        }
+        $post = get_post($post_id);
+        if (!$post || !$this->is_post_eligible($post, $settings)) {
+            return array('ok' => false, 'disposition' => 'permanent_failure', 'reason' => 'ineligible');
+        }
+        $resolved = self::resolve_social_destination(true);
+        $dest_id = (int) ($resolved['id'] ?? 0);
+        if ($dest_id < 1) {
+            return array('ok' => false, 'disposition' => 'permanent_failure', 'reason' => 'missing_destination');
+        }
+        $run_id = 'api_' . gmdate('YmdHis') . '_' . wp_generate_password(6, false);
+        $before = (string) $post->post_content;
+        $before_vernal = Vernal_Internal_Link_Inserter::analyze_internal_links($before);
+        $result = $this->process_source_outbound($post, $settings, $run_id, $dest_id, 'manual_run');
+        $disposition = isset($result['disposition']) ? (string) $result['disposition'] : 'permanent_failure';
+        if ($disposition !== 'transient_failure' && empty($result['errors'])) {
+            $this->stamp_source_pass($post_id, !empty($result['linked']));
+        }
+        $fresh = get_post($post_id);
+        $after = $fresh ? (string) $fresh->post_content : '';
+        $after_vernal = Vernal_Internal_Link_Inserter::analyze_internal_links($after);
+        $persisted = array();
+        if (preg_match_all('/<a\b[^>]*data-vernal-il-id=["\']([^"\']+)["\'][^>]*>(.*?)<\/a>/is', $after, $mm, PREG_SET_ORDER)) {
+            foreach ($mm as $m) {
+                $persisted[] = array(
+                    'mutation_id' => $m[1],
+                    'anchor_html' => wp_strip_all_tags($m[2]),
+                );
+            }
+        }
+        return array(
+            'ok'                    => true,
+            'plugin_version'        => defined('VERNAL_CONTENTUM_VERSION') ? VERNAL_CONTENTUM_VERSION : '',
+            'social_destination_id' => $dest_id,
+            'source_wp_post_id'     => $post_id,
+            'source_url'            => get_permalink($post_id),
+            'disposition'           => $disposition,
+            'linked'                => (int) ($result['linked'] ?? 0),
+            'skip_reasons'          => isset($result['skip_reasons']) ? $result['skip_reasons'] : array(),
+            'inserted_edges'        => isset($result['inserted_edges']) ? $result['inserted_edges'] : array(),
+            'vernal_links_before'   => (int) $before_vernal['vernal'],
+            'vernal_links_after'    => (int) $after_vernal['vernal'],
+            'persisted_vernal_anchors' => $persisted,
+            'content_changed'       => ($before !== $after),
+            'note'                  => isset($result['note']) ? (string) $result['note'] : '',
+            'machine_request_failed'=> (int) ($result['machine_request_failed'] ?? 0),
+        );
+    }
+
+    /**
+     * Clear stuck run lock + in-progress LAST_RUN (REST / admin).
+     *
+     * @return array
+     */
+    public function clear_stuck_run_api() {
+        delete_option(self::OPTION_LOCK);
+        $ts = wp_next_scheduled(self::CRON_MANUAL);
+        if ($ts) {
+            wp_unschedule_event($ts, self::CRON_MANUAL);
+        }
+        $last = get_option(self::OPTION_LAST_RUN, array());
+        if (is_array($last)) {
+            $status = (string) ($last['status'] ?? '');
+            if (in_array($status, array('queued', 'running', 'skipped_locked'), true)) {
+                $last['status'] = 'error';
+                $last['message'] = __('Stuck run cleared via API.', 'vernal-contentum');
+                $last['completed_at'] = gmdate('c');
+            }
+            $last['progress_label'] = '';
+            update_option(self::OPTION_LAST_RUN, $last, false);
+        }
+        return array('ok' => true, 'cleared' => true);
     }
 
     private function process_inbound_backfill($new_post, $settings, $run_id, $dest_id, $trigger) {

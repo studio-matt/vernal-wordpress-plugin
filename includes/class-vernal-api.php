@@ -242,6 +242,18 @@ class Vernal_API {
             ),
         ));
 
+        // Synchronous one-post IL process + read-back (cert / ops).
+        register_rest_route($namespace, '/internal-links/process-source', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'process_internal_links_source'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+        register_rest_route($namespace, '/internal-links/clear-stuck-run', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'clear_internal_links_stuck_run'),
+            'permission_callback' => array($this, 'check_api_key'),
+        ));
+
         // Show landings list (legacy retrofit + Machine reconcile)
         register_rest_route($namespace, '/shows', array(
             'methods' => 'GET',
@@ -852,6 +864,38 @@ class Vernal_API {
             'post_id'  => $post_id,
             'reason'   => isset($result['reason']) ? $result['reason'] : '',
         ));
+    }
+
+    public function process_internal_links_source($request) {
+        if (!class_exists('Vernal_Internal_Links')) {
+            return new WP_Error(
+                'unavailable',
+                __('Internal linking module not loaded', 'vernal-contentum'),
+                array('status' => 500)
+            );
+        }
+        $params = $request->get_json_params();
+        if (!is_array($params)) {
+            $params = array();
+        }
+        $post_id = isset($params['wp_post_id']) ? (int) $params['wp_post_id'] : (int) $request->get_param('wp_post_id');
+        if ($post_id < 1) {
+            return new WP_Error('invalid_post', __('wp_post_id required', 'vernal-contentum'), array('status' => 400));
+        }
+        $out = Vernal_Internal_Links::get_instance()->process_source_for_api($post_id);
+        return rest_ensure_response(array('success' => !empty($out['ok']), 'data' => $out));
+    }
+
+    public function clear_internal_links_stuck_run($request) {
+        if (!class_exists('Vernal_Internal_Links')) {
+            return new WP_Error(
+                'unavailable',
+                __('Internal linking module not loaded', 'vernal-contentum'),
+                array('status' => 500)
+            );
+        }
+        $out = Vernal_Internal_Links::get_instance()->clear_stuck_run_api();
+        return rest_ensure_response(array('success' => true, 'data' => $out));
     }
 
     public function update_show_notes($request) {
