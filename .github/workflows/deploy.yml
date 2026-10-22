@@ -276,12 +276,36 @@ jobs:
           done
 
           if [ "$ANY_SIBLING" -eq 0 ]; then
-            echo "::error::No sibling plugin installs found (Irreverent Health not updated)"
-            exit 1
+            echo "::warning::No sibling plugin installs found via SSH (will try self-update API)"
           fi
           if [ "$IH_OK" -ne 1 ]; then
-            echo "::error::Irreverent Health plugin path was not updated to $EXPECTED_VER"
-            echo "Live site will keep serving the old plugin until this path is writable from the deploy user."
+            echo "::warning::SSH could not update Irreverent Health to $EXPECTED_VER — trying REST self-update"
+            IH_KEY="${{ secrets.IRREVERENT_HEALTH_WP_API_KEY }}"
+            if [ -z "$IH_KEY" ]; then
+              echo "::warning::IRREVERENT_HEALTH_WP_API_KEY secret not set; cannot self-update from CI"
+            else
+              RESP=$(curl -sS -X POST "https://irreverenthealth.com/wp-json/vernal-contentum/v1/self-update" \
+                -H "X-API-Key: $IH_KEY" -H "Content-Type: application/json" \
+                -d "{\"tag\":\"v${EXPECTED_VER}\"}" -w "\n%{http_code}" || true)
+              BODY=$(echo "$RESP" | sed '$d')
+              CODE=$(echo "$RESP" | tail -1)
+              echo "self-update HTTP $CODE: $BODY"
+              if echo "$BODY" | grep -q "\"plugin_version\":\"$EXPECTED_VER\""; then
+                IH_OK=1
+              fi
+            fi
+          fi
+          # Final verify: live REST must expose this version (or export routes on 1.5.29+)
+          LIVE_VER=$(curl -sS "https://irreverenthealth.com/wp-json/vernal-contentum/v1/health" \
+            -H "X-API-Key: ${{ secrets.IRREVERENT_HEALTH_WP_API_KEY }}" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print((d.get('data') or d).get('plugin_version') or '')" 2>/dev/null || true)
+          echo "Live health plugin_version=${LIVE_VER:-unknown}"
+          if [ "$IH_OK" -ne 1 ] && [ "$LIVE_VER" = "$EXPECTED_VER" ]; then
+            IH_OK=1
+          fi
+          if [ "$IH_OK" -ne 1 ]; then
+            echo "::error::Irreverent Health is not on $EXPECTED_VER after SSH + self-update fallback"
+            echo "Set repo secret IRREVERENT_HEALTH_WP_API_KEY (site vc_… key) or fix SSH write to /home/irreverenthealth/.../vernal-contentum"
             exit 1
           fi
           echo "✓ Sibling deploys verified at $EXPECTED_VER"
