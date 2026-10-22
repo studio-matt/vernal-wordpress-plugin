@@ -1134,14 +1134,14 @@ class Vernal_Internal_Links {
                 'method'  => 'POST',
                 'body'    => $payload,
                 'timeout' => 90,
-                'retries' => 2,
+                'retries' => 3,
             ));
             if (is_wp_error($resp)) {
                 $out['errors']++;
                 $out['machine_request_failed']++;
                 $bump('machine_request_failed');
                 $out['note'] = 'machine_error: ' . $resp->get_error_message();
-                // Do not abort the whole job counters — stop further attempts for this source.
+                // Transient Machine blips (deploy / 429) — do not burn remaining room.
                 break;
             }
             $results = isset($resp['results']) && is_array($resp['results']) ? $resp['results'] : array();
@@ -1152,6 +1152,9 @@ class Vernal_Internal_Links {
                     if ($diag === 'gated_empty') {
                         $bump('gated_empty');
                         $out['note'] = 'Match pool existed but gates/score left no usable edge';
+                    } elseif ($diag === 'no_grounded_anchor') {
+                        $bump('no_grounded_anchor');
+                        $out['note'] = 'Related targets existed but no usable link phrase in the article body';
                     } else {
                         $bump('no_machine_candidates');
                         $out['note'] = 'Machine returned no candidates (empty index or no related articles)';
@@ -1162,6 +1165,20 @@ class Vernal_Internal_Links {
             }
 
             $row = $results[0];
+            // Legacy Machine payloads could return a scored edge with empty anchors.
+            if (
+                (isset($row['reject_reason']) && sanitize_key((string) $row['reject_reason']) === 'no_grounded_anchor')
+                || empty($row['anchors'])
+                || !is_array($row['anchors'])
+            ) {
+                $out['semantic_targets_rejected']++;
+                $bump('no_grounded_anchor');
+                $tid = isset($row['target_wp_post_id']) ? (int) $row['target_wp_post_id'] : 0;
+                if ($tid > 0) {
+                    $skip_targets[] = $tid;
+                }
+                continue;
+            }
             $out['semantic_targets_found']++;
             $score = isset($row['score']) ? (float) $row['score'] : 0;
             if ($score < (float) $settings['min_relevance_score']) {
