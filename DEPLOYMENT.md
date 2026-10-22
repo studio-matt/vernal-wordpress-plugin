@@ -13,7 +13,7 @@ Uses SSH and rsync for secure, efficient file transfers.
 - `SSH_PRIVATE_KEY` - Your private SSH key (the entire key, including `-----BEGIN` and `-----END` lines)
 - `SERVER_HOST` - Your server hostname or IP address (e.g., `example.com` or `192.168.1.100`)
 - `SERVER_USER` - SSH username (e.g., `root` or `deploy`)
-- `SERVER_PATH` - Full path to plugin directory on server (e.g., `/var/www/html/wp-content/plugins/vernal-contentum/`)
+- `SERVER_PATH` - Full path to the **vernalcontentum.com** plugin directory (e.g., `/home/.../public_html/wp-content/plugins/vernal-contentum/`). Client sites are **not** deployed by this workflow; they update from GitHub Releases.
 
 **Setup Steps:**
 1. Generate an SSH key pair if you don't have one:

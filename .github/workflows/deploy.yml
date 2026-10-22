@@ -118,194 +118,29 @@ jobs:
           }
           echo "✓ Files deployed successfully"
       
-      - name: Verify deployment
+      # Primary target only: SERVER_PATH (vernalcontentum.com). Client sites (e.g. IH)
+      # update via GitHub Releases / in-plugin updater — not this SSH job.
+      - name: Verify primary deployment
         env:
           SERVER_PATH: ${{ secrets.SERVER_PATH }}
         run: |
-          echo "Verifying deployed files..."
-          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
-            "PRIMARY='$SERVER_PATH'; bash -s" <<'EOS'
-          set +e
-          ls -la "$PRIMARY" | head -20
-          echo "whoami=$(whoami) HOME=$HOME"
-          ls -la "$HOME" | head -40
-          ls -la "$HOME/public_html" 2>/dev/null | head -30
-          ls -la "$HOME/domains" 2>/dev/null | head -30
-          echo "--- /home accounts ---"
-          ls -la /home 2>/dev/null | head -60
-          echo "--- airlift caches (home) ---"
-          find "$HOME" -type d -path '*/cache/airlift' 2>/dev/null | while read -r d; do
-            echo "Clearing $d"
-            rm -rf "$d"/* "$d"/.[!.]* 2>/dev/null
-            echo "cleared:$d"
-          done
-          echo "--- airlift caches (server-wide readable) ---"
-          find /home -type d -path '*/cache/airlift' 2>/dev/null | while read -r d; do
-            echo "Found $d"
-            if [ -w "$d" ]; then
-              rm -rf "$d"/* "$d"/.[!.]* 2>/dev/null
-              echo "cleared:$d"
-            else
-              echo "not-writable:$d"
-            fi
-          done
-          # Irreverent Health is a sibling cPanel account on this host (execute-bit traversal).
-          IH_ROOT="/home/irreverenthealth/public_html"
-          echo "--- irreverenthealth probe ---"
-          ls -la "$IH_ROOT" 2>&1 | head -20
-          ls -la "$IH_ROOT/wp-content/plugins" 2>&1 | head -30
-          ls -la "$IH_ROOT/wp-content/cache/airlift/irreverenthealth.com/episodes" 2>&1 | head -20
-          for f in \
-            "$IH_ROOT/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html" \
-            "$IH_ROOT/wp-content/cache/airlift/irreverenthealth.com/episodes/index-https.html_gzip" \
-            "$IH_ROOT/wp-content/cache/airlift/irreverenthealth.com/index-https.html"
-          do
-            if [ -e "$f" ]; then
-              echo "Removing $f"
-              rm -f "$f" && echo "removed:$f" || echo "rm-failed:$f"
-            else
-              echo "missing:$f"
-            fi
-          done
-          # Wipe whole Irreverent Airlift tree if writable
-          if [ -d "$IH_ROOT/wp-content/cache/airlift" ]; then
-            echo "Wiping $IH_ROOT/wp-content/cache/airlift"
-            rm -rf "$IH_ROOT/wp-content/cache/airlift"/* && echo "wiped-airlift" || echo "wipe-failed"
-          fi
-          echo "--- sibling plugins ---"
-          find "$HOME" /home/irreverenthealth -type f -name vernal-contentum.php 2>/dev/null | sed 's#/vernal-contentum.php$##' | sort -u | head -20
-          EOS
-          echo "✓ Deployment verified"
-
-      # Irreverent Health + siblings. Do NOT silently no-op — IH stuck on old plugin
-      # breaks PATCH /media and structured featured_image SEO.
-      - name: Deploy all sibling vernal-contentum installs (incl. Irreverent Health)
-        run: |
           set -euo pipefail
-          HOST="${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}"
-          PRIMARY="${{ secrets.SERVER_PATH }}"
           EXPECTED_VER=$(grep -E '^\s*\*\s*Version:' vernal-contentum.php | head -1 | sed -E 's/.*Version:\s*([0-9.]+).*/\1/')
           echo "Expected plugin version: $EXPECTED_VER"
-
-          ssh_retry() {
-            local n=0
-            until ssh -o ConnectTimeout=20 -o ServerAliveInterval=5 "$HOST" "$@"; do
-              n=$((n+1))
-              if [ "$n" -ge 4 ]; then
-                return 1
-              fi
-              echo "ssh retry $n..."
-              sleep $((n*3))
-            done
-          }
-
-          CANDIDATES=(
-            "/home/irreverenthealth/public_html/wp-content/plugins/vernal-contentum"
-            "/home/irreverenthealth/domains/irreverenthealth.com/public_html/wp-content/plugins/vernal-contentum"
-            "/home/irreverenthealth/www/wp-content/plugins/vernal-contentum"
-            "/home/irreverenthealth/public_html/domains/irreverenthealth.com/wp-content/plugins/vernal-contentum"
-          )
-
-          mapfile -t FOUND < <(ssh_retry 'set +e
-            find /home -xdev -type f -name vernal-contentum.php 2>/dev/null \
-              | sed "s#/vernal-contentum.php\$##" | sort -u
-          ' || true)
-
-          echo "Found on disk:"
-          printf '  %s\n' "${FOUND[@]:-}"
-
-          DEST_SET=()
-          for d in "${CANDIDATES[@]}" "${FOUND[@]}"; do
-            [ -n "${d:-}" ] || continue
-            DEST_SET+=("${d%/}")
-          done
-          mapfile -t DESTS < <(printf '%s\n' "${DEST_SET[@]}" | awk 'NF && !seen[$0]++')
-
-          IH_OK=0
-          ANY_SIBLING=0
-          for DEST_N in "${DESTS[@]}"; do
-            PRIM_N="${PRIMARY%/}"
-            if [ "$DEST_N" = "$PRIM_N" ]; then
-              echo "Skip primary (already deployed): $DEST_N"
-              continue
-            fi
-            ANY_SIBLING=1
-            echo "Deploying sibling: $DEST_N"
-            # Prefer direct write; fall back to sudo as the account owner (cPanel).
-            OWNER=$(echo "$DEST_N" | sed -n 's#^/home/\([^/]*\)/.*#\1#p')
-            WRITE_OK=0
-            if ssh_retry "mkdir -p '$DEST_N' && test -w '$DEST_N'"; then
-              WRITE_OK=1
-            elif [ -n "$OWNER" ] && ssh_retry "sudo -n -u '$OWNER' mkdir -p '$DEST_N' && sudo -n -u '$OWNER' test -w '$DEST_N'"; then
-              echo "Using sudo -u $OWNER for $DEST_N"
-              WRITE_OK=2
-            else
-              echo "::error::Cannot write $DEST_N (direct or sudo -u ${OWNER:-?})"
-              continue
-            fi
-            if [ "$WRITE_OK" = "1" ]; then
-              rsync -avz --delete \
-                --exclude='.git' --exclude='.git/**' --exclude='.github' \
-                --exclude='.gitignore' --exclude='README.md' --exclude='DEPLOYMENT.md' \
-                --exclude='VERSIONING.md' --exclude='TROUBLESHOOTING.md' \
-                --exclude='UPDATE_SYSTEM.md' --exclude='SECRETS_SETUP.md' --exclude='.DS_Store' \
-                ./ "$HOST:$DEST_N/"
-            else
-              # Stage on a writable tmp, then sudo-copy into account tree.
-              STAGE="/tmp/vernal-contentum-stage-$$"
-              ssh_retry "rm -rf '$STAGE' && mkdir -p '$STAGE'"
-              rsync -avz --delete \
-                --exclude='.git' --exclude='.git/**' --exclude='.github' \
-                --exclude='.gitignore' --exclude='README.md' --exclude='DEPLOYMENT.md' \
-                --exclude='VERSIONING.md' --exclude='TROUBLESHOOTING.md' \
-                --exclude='UPDATE_SYSTEM.md' --exclude='SECRETS_SETUP.md' --exclude='.DS_Store' \
-                ./ "$HOST:$STAGE/"
-              ssh_retry "sudo -n bash -lc 'rm -rf \"$DEST_N\"/* && cp -a \"$STAGE\"/. \"$DEST_N\"/ && chown -R \"$OWNER:$OWNER\" \"$DEST_N\" && touch \"$DEST_N/vernal-contentum.php\"' && rm -rf '$STAGE'"
-            fi
-            VER_LINE=$(ssh_retry "grep -E '^ \\* Version:' '$DEST_N/vernal-contentum.php' | head -1" || true)
-            echo "  on-disk: $VER_LINE"
-            ssh_retry "touch '$DEST_N/vernal-contentum.php' '$DEST_N/includes/class-vernal-api.php' 2>/dev/null; true" || true
-            if echo "$VER_LINE" | grep -q "$EXPECTED_VER"; then
-              if echo "$DEST_N" | grep -qi irreverenthealth; then
-                IH_OK=1
-              fi
-            else
-              echo "::error::Version mismatch at $DEST_N (wanted $EXPECTED_VER)"
-            fi
-            ssh_retry "ROOT=\$(dirname \$(dirname \$(dirname '$DEST_N'))); rm -rf \"\$ROOT/cache/airlift\"/* 2>/dev/null; true" || true
-          done
-
-          if [ "$ANY_SIBLING" -eq 0 ]; then
-            echo "::warning::No sibling plugin installs found via SSH (will try self-update API)"
+          echo "Verifying primary path: $SERVER_PATH"
+          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
+            "PRIMARY='$SERVER_PATH' EXPECTED_VER='$EXPECTED_VER' bash -s" <<'EOS'
+          set -euo pipefail
+          test -f "$PRIMARY/vernal-contentum.php"
+          ls -la "$PRIMARY" | head -20
+          VER_LINE=$(grep -E '^ \* Version:' "$PRIMARY/vernal-contentum.php" | head -1 || true)
+          echo "on-disk: $VER_LINE"
+          echo "$VER_LINE" | grep -q "$EXPECTED_VER"
+          # Clear Airlift under this site only (not sibling accounts)
+          ROOT=$(dirname "$(dirname "$(dirname "$PRIMARY")")")
+          if [ -d "$ROOT/wp-content/cache/airlift" ] && [ -w "$ROOT/wp-content/cache/airlift" ]; then
+            rm -rf "$ROOT/wp-content/cache/airlift"/* 2>/dev/null || true
+            echo "cleared airlift under $ROOT"
           fi
-          if [ "$IH_OK" -ne 1 ]; then
-            echo "::warning::SSH could not update Irreverent Health to $EXPECTED_VER — trying REST self-update"
-            IH_KEY="${{ secrets.IRREVERENT_HEALTH_WP_API_KEY }}"
-            if [ -z "$IH_KEY" ]; then
-              echo "::warning::IRREVERENT_HEALTH_WP_API_KEY secret not set; cannot self-update from CI"
-            else
-              RESP=$(curl -sS -X POST "https://irreverenthealth.com/wp-json/vernal-contentum/v1/self-update" \
-                -H "X-API-Key: $IH_KEY" -H "Content-Type: application/json" \
-                -d "{\"tag\":\"v${EXPECTED_VER}\"}" -w "\n%{http_code}" || true)
-              BODY=$(echo "$RESP" | sed '$d')
-              CODE=$(echo "$RESP" | tail -1)
-              echo "self-update HTTP $CODE: $BODY"
-              if echo "$BODY" | grep -q "\"plugin_version\":\"$EXPECTED_VER\""; then
-                IH_OK=1
-              fi
-            fi
-          fi
-          # Final verify: live REST must expose this version (or export routes on 1.5.29+)
-          LIVE_VER=$(curl -sS "https://irreverenthealth.com/wp-json/vernal-contentum/v1/health" \
-            -H "X-API-Key: ${{ secrets.IRREVERENT_HEALTH_WP_API_KEY }}" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print((d.get('data') or d).get('plugin_version') or '')" 2>/dev/null || true)
-          echo "Live health plugin_version=${LIVE_VER:-unknown}"
-          if [ "$IH_OK" -ne 1 ] && [ "$LIVE_VER" = "$EXPECTED_VER" ]; then
-            IH_OK=1
-          fi
-          if [ "$IH_OK" -ne 1 ]; then
-            echo "::error::Irreverent Health is not on $EXPECTED_VER after SSH + self-update fallback"
-            echo "Set repo secret IRREVERENT_HEALTH_WP_API_KEY (site vc_… key) or fix SSH write to /home/irreverenthealth/.../vernal-contentum"
-            exit 1
-          fi
-          echo "✓ Sibling deploys verified at $EXPECTED_VER"
+          EOS
+          echo "✓ Primary deployment verified at $EXPECTED_VER (vernalcontentum.com)"
