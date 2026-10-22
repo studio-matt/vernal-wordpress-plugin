@@ -1,0 +1,41 @@
+name: Machine route contract (required)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@v4
+
+      - name: Checkout backend at compatible tip
+        uses: actions/checkout@v4
+        with:
+          repository: studio-matt/vernal-agents-post-v0
+          path: backend-repo-git
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install backend deps
+        working-directory: backend-repo-git
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: WP→Machine route contract
+        working-directory: backend-repo-git
+        run: python scripts/check_wp_machine_route_contract.py --plugin-root "$GITHUB_WORKSPACE"
+
+      - name: Compat matrix
+        working-directory: backend-repo-git
+        run: python scripts/check_plugin_backend_compat.py

@@ -97,9 +97,9 @@ class Vernal_Backend_API {
             $args['headers']['X-API-Key'] = $api_key;
         }
         
-        // If body is provided and is an array, encode it as JSON
-        if (isset($args['body']) && is_array($args['body'])) {
-            $args['body'] = json_encode($args['body']);
+        // If body is provided and is an array/object, encode it as JSON
+        if (isset($args['body']) && (is_array($args['body']) || is_object($args['body']))) {
+            $args['body'] = wp_json_encode($args['body']);
         }
         
         $max_attempts = 1;

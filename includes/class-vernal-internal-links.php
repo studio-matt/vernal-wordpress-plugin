@@ -171,31 +171,20 @@ class Vernal_Internal_Links {
             );
         }
 
-        $backend_url = Vernal_Backend_API::get_backend_url();
-        $api_key = Vernal_Backend_API::get_api_key();
-        $boot_url = trailingslashit($backend_url) . 'podcasts/retrofit/bootstrap?site_url=' . rawurlencode(home_url('/'));
-        $boot_resp = wp_remote_get($boot_url, array(
-            'headers' => array('X-API-Key' => $api_key),
-            'timeout' => 30,
-        ));
-        if (is_wp_error($boot_resp)) {
+        $boot = Vernal_Backend_API::request(
+            'plugin/retrofit/bootstrap?site_url=' . rawurlencode(home_url('/')),
+            array('method' => 'GET', 'timeout' => 30)
+        );
+        if (is_wp_error($boot)) {
+            $data = $boot->get_error_data();
+            $code = is_array($data) && isset($data['status_code']) ? (int) $data['status_code'] : 0;
             return array(
                 'id'     => 0,
                 'label'  => '',
                 'source' => 'none',
-                'error'  => 'bootstrap_unreachable',
+                'error'  => $code > 0 ? ('bootstrap_http_' . $code) : 'bootstrap_unreachable',
             );
         }
-        $code = (int) wp_remote_retrieve_response_code($boot_resp);
-        if ($code !== 200) {
-            return array(
-                'id'     => 0,
-                'label'  => '',
-                'source' => 'none',
-                'error'  => 'bootstrap_http_' . $code,
-            );
-        }
-        $boot = json_decode(wp_remote_retrieve_body($boot_resp), true);
         if (!is_array($boot) || empty($boot['resolved_destination_id'])) {
             return array(
                 'id'     => 0,
@@ -225,6 +214,67 @@ class Vernal_Internal_Links {
             'source' => 'bootstrap',
             'error'  => '',
         );
+    }
+
+    /**
+     * RAG / wp-article-v1 index health for admin strip (bootstrap destination metadata).
+     *
+     * @param int $dest_id
+     * @return array{destination_id:int,rag_last_synced_at:string,upserted:?int,errors:?int,eligible_count:?int,skipped_excluded:?int,source:string,warn:string}
+     */
+    private function get_rag_index_health_snapshot($dest_id) {
+        $dest_id = (int) $dest_id;
+        $out = array(
+            'destination_id'    => $dest_id,
+            'rag_last_synced_at'=> '',
+            'upserted'          => null,
+            'errors'            => null,
+            'eligible_count'    => null,
+            'skipped_excluded'  => null,
+            'source'            => '',
+            'warn'              => '',
+        );
+        if ($dest_id < 1) {
+            return $out;
+        }
+
+        $apply_destination = function ($row) use (&$out) {
+            if (!is_array($row)) {
+                return;
+            }
+            if (!empty($row['rag_last_synced_at'])) {
+                $out['rag_last_synced_at'] = (string) $row['rag_last_synced_at'];
+            }
+            $summary = isset($row['rag_last_sync_summary']) && is_array($row['rag_last_sync_summary'])
+                ? $row['rag_last_sync_summary']
+                : array();
+            foreach (array('upserted', 'errors', 'eligible_count', 'skipped_excluded') as $key) {
+                if (array_key_exists($key, $summary) && $summary[$key] !== null && $summary[$key] !== '') {
+                    $out[$key] = (int) $summary[$key];
+                }
+            }
+        };
+
+        if (class_exists('Vernal_Backend_API') && Vernal_Backend_API::is_configured()) {
+            $boot = Vernal_Backend_API::request(
+                'plugin/retrofit/bootstrap?site_url=' . rawurlencode(home_url('/')),
+                array('method' => 'GET', 'timeout' => 25)
+            );
+            if (is_array($boot) && !empty($boot['resolved_destination']) && is_array($boot['resolved_destination'])) {
+                $rd = $boot['resolved_destination'];
+                if ((int) ($rd['id'] ?? 0) === $dest_id) {
+                    $apply_destination($rd);
+                    $out['source'] = 'bootstrap';
+                }
+            }
+        }
+
+        if ($out['errors'] !== null && (int) $out['errors'] > 0) {
+            $out['warn'] = __('Last RAG sync reported errors — article index may be incomplete.', 'vernal-contentum');
+        } elseif ($out['upserted'] === 0 && $out['eligible_count'] !== null && (int) $out['eligible_count'] > 0) {
+            $out['warn'] = __('Last sync upserted zero articles despite eligible posts — check Machine AWS identity.', 'vernal-contentum');
+        }
+        return $out;
     }
 
     public function register_schedules($schedules) {
@@ -1098,8 +1148,14 @@ class Vernal_Internal_Links {
             if (!$results) {
                 $out['semantic_targets_rejected']++;
                 if ($inserted_this_pass === 0 && !$saw_empty_machine) {
-                    $bump('no_machine_candidates');
-                    $out['note'] = 'Machine returned no candidates (empty index, gates, or no related articles)';
+                    $diag = isset($resp['match_diagnostic']) ? sanitize_key((string) $resp['match_diagnostic']) : '';
+                    if ($diag === 'gated_empty') {
+                        $bump('gated_empty');
+                        $out['note'] = 'Match pool existed but gates/score left no usable edge';
+                    } else {
+                        $bump('no_machine_candidates');
+                        $out['note'] = 'Machine returned no candidates (empty index or no related articles)';
+                    }
                     $saw_empty_machine = true;
                 }
                 break;
@@ -2178,7 +2234,8 @@ class Vernal_Internal_Links {
             'no_eligible_sources'       => __('No eligible articles this pass (cooldown, exclusions, or filters)', 'vernal-contentum'),
             'already_at_link_cap'       => __('Article already at max links', 'vernal-contentum'),
             'machine_request_failed'    => __('Could not reach Vernal match API', 'vernal-contentum'),
-            'no_machine_candidates'     => __('Vernal found no related article (often empty RAG index or gates)', 'vernal-contentum'),
+            'no_machine_candidates'     => __('Vernal found no related article (often empty RAG index)', 'vernal-contentum'),
+            'gated_empty'               => __('Related articles existed but were filtered out by score, caps, or linking rules', 'vernal-contentum'),
             'below_min_relevance'       => __('Best match scored below minimum relatedness', 'vernal-contentum'),
             'invalid_or_excluded_target'=> __('Suggested target was invalid or excluded', 'vernal-contentum'),
             'no_grounded_anchor'        => __('No usable link phrase in the article body', 'vernal-contentum'),
@@ -2437,6 +2494,48 @@ class Vernal_Internal_Links {
             <?php endif; ?>
 
             <?php
+            $index_health = $this->get_rag_index_health_snapshot((int) ($resolved['id'] ?? 0));
+            ?>
+            <div style="background:#fff;border:1px solid #ccd0d4;padding:12px 20px;margin:20px 0;max-width:920px;">
+                <h2 style="margin-top:0;font-size:15px;"><?php esc_html_e('Article index health', 'vernal-contentum'); ?></h2>
+                <p class="description" style="margin:0 0 8px;max-width:820px;">
+                    <?php esc_html_e('WordPress → Machine RAG sync status for internal linking (wp-article-v1).', 'vernal-contentum'); ?>
+                </p>
+                <ul style="list-style:none;margin:0;padding:0;font-size:14px;display:flex;flex-wrap:wrap;gap:12px 24px;">
+                    <li><strong><?php esc_html_e('Destination ID', 'vernal-contentum'); ?>:</strong>
+                        <?php echo (int) $index_health['destination_id'] > 0 ? (int) $index_health['destination_id'] : esc_html__('—', 'vernal-contentum'); ?>
+                    </li>
+                    <li><strong><?php esc_html_e('Last RAG sync', 'vernal-contentum'); ?>:</strong>
+                        <?php
+                        echo $index_health['rag_last_synced_at'] !== ''
+                            ? esc_html($index_health['rag_last_synced_at'])
+                            : esc_html__('Unknown', 'vernal-contentum');
+                        ?>
+                    </li>
+                    <li><strong><?php esc_html_e('Upserted', 'vernal-contentum'); ?>:</strong>
+                        <?php
+                        echo $index_health['upserted'] !== null
+                            ? (int) $index_health['upserted']
+                            : esc_html__('—', 'vernal-contentum');
+                        ?>
+                    </li>
+                    <li><strong><?php esc_html_e('Sync errors', 'vernal-contentum'); ?>:</strong>
+                        <?php
+                        echo $index_health['errors'] !== null
+                            ? (int) $index_health['errors']
+                            : esc_html__('—', 'vernal-contentum');
+                        ?>
+                    </li>
+                    <?php if ($index_health['eligible_count'] !== null) : ?>
+                        <li><strong><?php esc_html_e('Eligible posts', 'vernal-contentum'); ?>:</strong> <?php echo (int) $index_health['eligible_count']; ?></li>
+                    <?php endif; ?>
+                </ul>
+                <?php if ($index_health['warn'] !== '') : ?>
+                    <p class="notice notice-warning inline" style="margin:10px 0 0;padding:8px 12px;"><?php echo esc_html($index_health['warn']); ?></p>
+                <?php endif; ?>
+            </div>
+
+            <?php
             $status_payload = $this->get_run_status_payload();
             $in_progress = !empty($status_payload['in_progress']);
             ?>
@@ -2550,7 +2649,8 @@ class Vernal_Internal_Links {
                   'no_eligible_sources' => __('No eligible articles this pass (cooldown, exclusions, or filters)', 'vernal-contentum'),
                   'already_at_link_cap' => __('Article already at max links', 'vernal-contentum'),
                   'machine_request_failed' => __('Could not reach Vernal match API', 'vernal-contentum'),
-                  'no_machine_candidates' => __('Vernal found no related article (often empty RAG index or gates)', 'vernal-contentum'),
+                  'no_machine_candidates' => __('Vernal found no related article (often empty RAG index)', 'vernal-contentum'),
+                  'gated_empty' => __('Related articles existed but were filtered out by score, caps, or linking rules', 'vernal-contentum'),
                   'below_min_relevance' => __('Best match scored below minimum relatedness', 'vernal-contentum'),
                   'invalid_or_excluded_target' => __('Suggested target was invalid or excluded', 'vernal-contentum'),
                   'no_grounded_anchor' => __('No usable link phrase in the article body', 'vernal-contentum'),
@@ -2562,15 +2662,21 @@ class Vernal_Internal_Links {
                 var el = document.getElementById(id);
                 if (el) el.textContent = text == null ? '' : String(text);
               }
+              var idleHint = <?php echo wp_json_encode(__('Starts in the background so refreshing or saving settings will not stop it.', 'vernal-contentum')); ?>;
+              function runFinished(data) {
+                if (!data || data.in_progress) return false;
+                var s = data.status || '';
+                return s === 'completed' || s === 'error' || s === 'idle' || s === '';
+              }
               function apply(data) {
                 if (!data) return;
                 var wrap = document.getElementById('vernal-il-progress-wrap');
                 var bar = document.getElementById('vernal-il-progress-bar');
                 var btn = document.getElementById('vernal-il-run-btn');
-                if (wrap) wrap.style.display = data.in_progress ? '' : (data.status === 'completed' || data.status === 'error' ? '' : wrap.style.display);
+                var hint = document.getElementById('vernal-il-run-hint');
+                if (wrap) wrap.style.display = data.in_progress ? '' : (runFinished(data) ? '' : wrap.style.display);
                 if (data.in_progress && wrap) wrap.style.display = '';
-                if (!data.in_progress && (data.status === 'completed' || data.status === 'error') && wrap) {
-                  // keep bar visible at 100% briefly
+                if (runFinished(data) && wrap) {
                   wrap.style.display = '';
                 }
                 if (bar) bar.style.width = (data.progress_pct || 0) + '%';
@@ -2601,6 +2707,9 @@ class Vernal_Internal_Links {
                 if (btn) {
                   if (data.in_progress) btn.setAttribute('disabled', 'disabled');
                   else btn.removeAttribute('disabled');
+                }
+                if (hint && runFinished(data)) {
+                  hint.textContent = idleHint;
                 }
                 var why = document.getElementById('vernal-il-why-wrap');
                 if (why && data.skip_reasons && Object.keys(data.skip_reasons).length) {

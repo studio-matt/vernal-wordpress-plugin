@@ -561,68 +561,61 @@ class Vernal_Settings {
         $destination_id = isset($_REQUEST['destination_id']) ? intval($_REQUEST['destination_id']) : intval(get_option('vernal_contentum_retrofit_destination_id', 0));
 
         // Bootstrap: auto-resolve WordPress destination from this site's URL.
-        if (!empty($backend_url) && !empty($backend_api_key)) {
-            $boot_url = trailingslashit($backend_url) . 'podcasts/retrofit/bootstrap?site_url=' . rawurlencode(home_url('/'));
-            $boot_resp = wp_remote_get($boot_url, array(
-                'headers' => array('X-API-Key' => $backend_api_key),
-                'timeout' => 30,
-            ));
-            if (!is_wp_error($boot_resp) && wp_remote_retrieve_response_code($boot_resp) === 200) {
-                $boot = json_decode(wp_remote_retrieve_body($boot_resp), true);
-                if (is_array($boot)) {
-                    $destinations = isset($boot['destinations']) && is_array($boot['destinations']) ? $boot['destinations'] : array();
-                    $policy = isset($boot['policy']) && is_array($boot['policy']) ? $boot['policy'] : array();
-                    $quota = isset($boot['quota_usage']) && is_array($boot['quota_usage']) ? $boot['quota_usage'] : array();
-                    if ($destination_id <= 0 && !empty($boot['resolved_destination_id'])) {
-                        $destination_id = intval($boot['resolved_destination_id']);
-                        update_option('vernal_contentum_retrofit_destination_id', $destination_id, false);
-                    }
+        if (class_exists('Vernal_Backend_API') && Vernal_Backend_API::is_configured()) {
+            $boot = Vernal_Backend_API::request(
+                'plugin/retrofit/bootstrap?site_url=' . rawurlencode(home_url('/')),
+                array('method' => 'GET', 'timeout' => 30)
+            );
+            if (!is_wp_error($boot) && is_array($boot)) {
+                $destinations = isset($boot['destinations']) && is_array($boot['destinations']) ? $boot['destinations'] : array();
+                $policy = isset($boot['policy']) && is_array($boot['policy']) ? $boot['policy'] : array();
+                $quota = isset($boot['quota_usage']) && is_array($boot['quota_usage']) ? $boot['quota_usage'] : array();
+                if ($destination_id <= 0 && !empty($boot['resolved_destination_id'])) {
+                    $destination_id = intval($boot['resolved_destination_id']);
+                    update_option('vernal_contentum_retrofit_destination_id', $destination_id, false);
                 }
             } else {
                 $notice = __('Could not reach Machine bootstrap.', 'vernal-contentum');
                 $notice_type = 'warning';
-                if (is_wp_error($boot_resp)) {
-                    $notice .= ' ' . $boot_resp->get_error_message();
-                } else {
-                    $code = wp_remote_retrieve_response_code($boot_resp);
-                    $body = wp_remote_retrieve_body($boot_resp);
-                    $notice .= ' HTTP ' . intval($code);
-                    if ($body) {
-                        $notice .= ': ' . substr(wp_strip_all_tags($body), 0, 240);
-                    }
-                    if (intval($code) === 404) {
+                if (is_wp_error($boot)) {
+                    $notice .= ' ' . $boot->get_error_message();
+                    $err_data = $boot->get_error_data();
+                    if (is_array($err_data) && !empty($err_data['status_code']) && intval($err_data['status_code']) === 404) {
                         $notice .= ' ' . __('(Machine is missing the retrofit API — redeploy backend.)', 'vernal-contentum');
                     }
                 }
             }
         }
 
-        $machine_call = function ($method, $path, $payload = null) use ($backend_url, $backend_api_key) {
-            if (empty($backend_url) || empty($backend_api_key)) {
+        $machine_call = function ($method, $path, $payload = null) {
+            if (!class_exists('Vernal_Backend_API') || !Vernal_Backend_API::is_configured()) {
                 return array('ok' => false, 'error' => 'Backend URL and API key required.');
             }
-            $api_url = trailingslashit($backend_url) . ltrim($path, '/');
+            $endpoint = ltrim((string) $path, '/');
+            if (strpos($endpoint, 'plugin/retrofit/') !== 0) {
+                $endpoint = 'plugin/retrofit/' . preg_replace('#^podcasts/retrofit/#', '', $endpoint);
+            }
             $args = array(
                 'method' => strtoupper($method),
-                'headers' => array(
-                    'X-API-Key' => $backend_api_key,
-                    'Content-Type' => 'application/json',
-                ),
                 'timeout' => 180,
             );
             if ($payload !== null) {
-                $args['body'] = wp_json_encode($payload);
+                $args['body'] = is_array($payload) || is_object($payload) ? $payload : array();
             }
-            $response = wp_remote_request($api_url, $args);
+            $response = Vernal_Backend_API::request($endpoint, $args);
             if (is_wp_error($response)) {
-                return array('ok' => false, 'error' => $response->get_error_message());
+                $data = $response->get_error_data();
+                return array(
+                    'ok' => false,
+                    'error' => $response->get_error_message(),
+                    'code' => is_array($data) && isset($data['status_code']) ? intval($data['status_code']) : 0,
+                    'body' => is_array($data) && isset($data['response']) ? $data['response'] : null,
+                );
             }
-            $code = wp_remote_retrieve_response_code($response);
-            $body = json_decode(wp_remote_retrieve_body($response), true);
             return array(
-                'ok' => ($code >= 200 && $code < 300),
-                'code' => $code,
-                'body' => $body,
+                'ok' => true,
+                'code' => 200,
+                'body' => $response,
             );
         };
 
@@ -646,14 +639,14 @@ class Vernal_Settings {
                     'order' => sanitize_text_field(wp_unslash($_POST['order'] ?? 'show_number_desc')),
                     'shows_category' => sanitize_title(wp_unslash($_POST['category'] ?? $category_slug)),
                 );
-                $result = $machine_call('PUT', 'podcasts/retrofit/policy', $payload);
+                $result = $machine_call('PUT', 'plugin/retrofit/policy', $payload);
                 if ($result['ok'] && !empty($result['body']['policy'])) {
                     $policy = $result['body']['policy'];
                 }
             } elseif ($action === 'run_tick') {
-                $result = $machine_call('POST', 'podcasts/retrofit/run-quota-tick?limit=1', new stdClass());
+                $result = $machine_call('POST', 'plugin/retrofit/run-quota-tick?limit=1', new stdClass());
             } elseif ($action === 'discover_page' && $destination_id > 0) {
-                $result = $machine_call('POST', 'podcasts/retrofit/discover-batch', array(
+                $result = $machine_call('POST', 'plugin/retrofit/discover-batch', array(
                     'destination_id' => $destination_id,
                     'category' => $category_slug,
                     'page' => $paged,
@@ -661,35 +654,35 @@ class Vernal_Settings {
                     'diagnose' => true,
                 ));
             } elseif ($action === 'discover' && $wp_post_id && $destination_id) {
-                $result = $machine_call('POST', 'podcasts/retrofit/discover', array(
+                $result = $machine_call('POST', 'plugin/retrofit/discover', array(
                     'destination_id' => $destination_id,
                     'wp_post_id' => $wp_post_id,
                 ));
             } elseif ($action === 'ocr' && $wp_post_id && $destination_id) {
-                $result = $machine_call('POST', 'podcasts/retrofit/ocr', array(
+                $result = $machine_call('POST', 'plugin/retrofit/ocr', array(
                     'destination_id' => $destination_id,
                     'wp_post_id' => $wp_post_id,
                 ));
             } elseif ($action === 'confirm' && $wp_post_id && $destination_id) {
-                $result = $machine_call('POST', 'podcasts/retrofit/confirm', array(
+                $result = $machine_call('POST', 'plugin/retrofit/confirm', array(
                     'destination_id' => $destination_id,
                     'wp_post_id' => $wp_post_id,
                     'show_number' => intval($_POST['show_number'] ?? 0),
                     'force' => !empty($_POST['force']),
                 ));
             } elseif ($action === 'stage_show' && $wp_post_id && $destination_id) {
-                $result = $machine_call('POST', 'podcasts/retrofit/reconcile', array(
+                $result = $machine_call('POST', 'plugin/retrofit/reconcile', array(
                     'destination_id' => $destination_id,
                     'wp_post_id' => $wp_post_id,
                     'dry_run' => false,
                     'stage_only' => true,
                 ));
             } elseif ($action === 'queue' && !empty($_POST['retrofit_id'])) {
-                $result = $machine_call('POST', 'podcasts/retrofit/queue', array(
+                $result = $machine_call('POST', 'plugin/retrofit/queue', array(
                     'retrofit_id' => intval($_POST['retrofit_id']),
                 ));
             } elseif ($action === 'ongoing' && !empty($_POST['episode_id'])) {
-                $result = $machine_call('POST', 'podcasts/retrofit/ongoing-content', array(
+                $result = $machine_call('POST', 'plugin/retrofit/ongoing-content', array(
                     'episode_id' => sanitize_text_field(wp_unslash($_POST['episode_id'])),
                     'enabled' => !empty($_POST['ongoing_enabled']),
                 ));
@@ -734,22 +727,16 @@ class Vernal_Settings {
 
         $machine_rows = array();
         $episode_flags = array(); // episode_id => flags; also keyed by wp_post_id
-        if (!empty($backend_url) && !empty($backend_api_key)) {
-            $rows_url = trailingslashit($backend_url) . 'podcasts/retrofit/rows?limit=500';
+        if (class_exists('Vernal_Backend_API') && Vernal_Backend_API::is_configured()) {
+            $rows_ep = 'plugin/retrofit/rows?limit=500';
             if ($destination_id > 0) {
-                $rows_url .= '&destination_id=' . intval($destination_id);
+                $rows_ep .= '&destination_id=' . intval($destination_id);
             }
-            $resp = wp_remote_get($rows_url, array(
-                'headers' => array('X-API-Key' => $backend_api_key),
-                'timeout' => 45,
-            ));
-            if (!is_wp_error($resp) && wp_remote_retrieve_response_code($resp) === 200) {
-                $data = json_decode(wp_remote_retrieve_body($resp), true);
-                if (!empty($data['rows']) && is_array($data['rows'])) {
-                    foreach ($data['rows'] as $row) {
-                        if (!empty($row['wp_post_id'])) {
-                            $machine_rows[intval($row['wp_post_id'])] = $row;
-                        }
+            $data = Vernal_Backend_API::request($rows_ep, array('method' => 'GET', 'timeout' => 45));
+            if (!is_wp_error($data) && !empty($data['rows']) && is_array($data['rows'])) {
+                foreach ($data['rows'] as $row) {
+                    if (!empty($row['wp_post_id'])) {
+                        $machine_rows[intval($row['wp_post_id'])] = $row;
                     }
                 }
             }
@@ -811,7 +798,7 @@ class Vernal_Settings {
         $total = intval($q->found_posts);
         $total_pages = max(1, intval($q->max_num_pages));
 
-        if (!empty($backend_url) && !empty($backend_api_key)) {
+        if (class_exists('Vernal_Backend_API') && Vernal_Backend_API::is_configured()) {
             // Batch-load ongoing flags for Vernal-linked posts on this page.
             $eids = array();
             $wpids = array();
@@ -828,25 +815,19 @@ class Vernal_Settings {
             }
             $eids = array_values(array_unique(array_filter($eids)));
             if (!empty($eids) || !empty($wpids)) {
-                $flags_url = trailingslashit($backend_url) . 'podcasts/retrofit/episode-flags?'
+                $flags_ep = 'plugin/retrofit/episode-flags?'
                     . http_build_query(array(
                         'episode_ids' => implode(',', $eids),
                         'wp_post_ids' => implode(',', $wpids),
                     ));
-                $flags_resp = wp_remote_get($flags_url, array(
-                    'headers' => array('X-API-Key' => $backend_api_key),
-                    'timeout' => 30,
-                ));
-                if (!is_wp_error($flags_resp) && wp_remote_retrieve_response_code($flags_resp) === 200) {
-                    $flags_data = json_decode(wp_remote_retrieve_body($flags_resp), true);
-                    if (!empty($flags_data['episodes']) && is_array($flags_data['episodes'])) {
-                        foreach ($flags_data['episodes'] as $epf) {
-                            if (!empty($epf['episode_id'])) {
-                                $episode_flags[$epf['episode_id']] = $epf;
-                            }
-                            if (!empty($epf['wp_post_id'])) {
-                                $episode_flags['wp:' . intval($epf['wp_post_id'])] = $epf;
-                            }
+                $flags_data = Vernal_Backend_API::request($flags_ep, array('method' => 'GET', 'timeout' => 30));
+                if (!is_wp_error($flags_data) && !empty($flags_data['episodes']) && is_array($flags_data['episodes'])) {
+                    foreach ($flags_data['episodes'] as $epf) {
+                        if (!empty($epf['episode_id'])) {
+                            $episode_flags[$epf['episode_id']] = $epf;
+                        }
+                        if (!empty($epf['wp_post_id'])) {
+                            $episode_flags['wp:' . intval($epf['wp_post_id'])] = $epf;
                         }
                     }
                 }
