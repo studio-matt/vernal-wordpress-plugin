@@ -86,6 +86,10 @@ class Vernal_Backend_API {
             'headers' => array(
                 'X-API-Key' => $api_key,
                 'Content-Type' => 'application/json',
+                // Lets Machine refresh destination metadata.plugin_version on /plugin/test.
+                'X-Plugin-Version' => defined('VERNAL_CONTENTUM_VERSION')
+                    ? VERNAL_CONTENTUM_VERSION
+                    : '',
             ),
         );
         
@@ -95,6 +99,12 @@ class Vernal_Backend_API {
         // Add API key to headers
         if (!isset($args['headers']['X-API-Key'])) {
             $args['headers']['X-API-Key'] = $api_key;
+        }
+        if (
+            empty($args['headers']['X-Plugin-Version'])
+            && defined('VERNAL_CONTENTUM_VERSION')
+        ) {
+            $args['headers']['X-Plugin-Version'] = VERNAL_CONTENTUM_VERSION;
         }
         
         // If body is provided and is an array/object, encode it as JSON
