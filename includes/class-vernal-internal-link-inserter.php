@@ -477,6 +477,85 @@ class Vernal_Internal_Link_Inserter {
     }
 
     /**
+     * Single canonical HTML + plain text for MATCH and INSERT (must not diverge).
+     *
+     * Always use stored post_content. Never ground against filtered public HTML
+     * (the_content) or shortcode expansion — those are not a durable mutation
+     * substrate and caused Machine/plugin content_text drift (gated_empty /
+     * uninsertable anchors). Builder JSON (Elementor) is never a silent fallback.
+     *
+     * @param WP_Post|object $post
+     * @return array{html:string,plain:string,words:int,revision:string,source_kind:string,builder_locked:bool}
+     */
+    public static function resolve_canonical_il_document($post) {
+        $raw = isset($post->post_content) ? (string) $post->post_content : '';
+        $modified = isset($post->post_modified_gmt) ? (string) $post->post_modified_gmt : '';
+        $post_id = isset($post->ID) ? (int) $post->ID : 0;
+        $revision = sha1($modified . '|' . md5($raw) . '|' . $post_id);
+
+        $builder_locked = false;
+        if ($post_id > 0 && function_exists('get_post_meta')) {
+            $el_mode = (string) get_post_meta($post_id, '_elementor_edit_mode', true);
+            $el_data = get_post_meta($post_id, '_elementor_data', true);
+            if ($el_mode !== '' || (is_string($el_data) && strlen($el_data) > 20) || (is_array($el_data) && $el_data)) {
+                $builder_locked = true;
+            }
+        }
+
+        $html = $raw;
+        $kind = 'post_content';
+        $plain = self::insertable_plain_text($html);
+        $words = str_word_count($plain);
+
+        if ($builder_locked && $words < 80) {
+            $kind = 'builder_locked_thin';
+        } elseif ($words < 15) {
+            $kind = 'insufficient_plain';
+        }
+
+        return array(
+            'html'           => $html,
+            'plain'          => $plain,
+            'words'          => $words,
+            'revision'       => $revision,
+            'source_kind'    => $kind,
+            'builder_locked' => $builder_locked,
+            'raw_chars'      => strlen($raw),
+            'html_chars'     => strlen($html),
+        );
+    }
+
+    /**
+     * Heuristic: HTML contains paragraph/text nodes the classic inserter can wrap.
+     *
+     * @param string $html
+     * @return bool
+     */
+    public static function html_looks_mutable($html) {
+        $html = (string) $html;
+        if ($html === '') {
+            return false;
+        }
+        // Elementor/widget shells without body copy
+        if (preg_match('/data-elementor|elementor-widget/i', $html) && !preg_match('/<(p|li|td|blockquote)\b/i', $html)) {
+            return false;
+        }
+        return (bool) preg_match('/<(p|li|td|blockquote|div)\b[^>]*>/i', $html);
+    }
+
+    /**
+     * Normalize a Machine anchor phrase for comparison against insertable plain text.
+     *
+     * @param string $phrase
+     * @return string
+     */
+    public static function normalize_anchor_phrase($phrase) {
+        $t = html_entity_decode((string) $phrase, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $t = preg_replace('/\s+/u', ' ', $t);
+        return is_string($t) ? trim($t) : '';
+    }
+
+    /**
      * Generate a stable unique mutation id.
      *
      * @return string

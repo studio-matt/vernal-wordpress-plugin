@@ -28,6 +28,9 @@ function wp_parse_url($url, $component = -1) {
 function untrailingslashit($s) { return rtrim((string) $s, '/'); }
 function wp_strip_all_tags($s) { return strip_tags((string) $s); }
 function has_blocks($c) { return strpos((string) $c, '<!-- wp:') !== false; }
+function get_post_meta($post_id, $key, $single = false) { return $single ? '' : array(); }
+function do_shortcode($c) { return (string) $c; }
+function apply_filters($tag, $value) { return $value; }
 function parse_blocks($content) {
     // Minimal: treat whole content as freeform if no real parser
     return array(
@@ -158,6 +161,46 @@ $r_blocks = Vernal_Internal_Link_Inserter::insert_link($blocks, array(
     'mutation_id' => 'vil_blk',
 ));
 assert_true($r_blocks['inserted'], 'block walk or classic fallback inserts');
+
+// Canonical document: match plain derived from same HTML used for insert
+$post_obj = (object) array(
+    'ID' => 10,
+    'post_content' => '<p>Entrepreneurs need capital when they discover they lack financing options for growth, runway, and investor readiness.</p>',
+    'post_modified_gmt' => '2026-10-22 00:00:00',
+);
+$doc = Vernal_Internal_Link_Inserter::resolve_canonical_il_document($post_obj);
+assert_true($doc['source_kind'] === 'post_content', 'canonical prefers post_content');
+assert_true(str_word_count($doc['plain']) >= 5, 'canonical plain has words');
+assert_true(stripos($doc['plain'], 'entrepreneurs need capital') !== false, 'canonical plain keeps phrase');
+$ins_c = Vernal_Internal_Link_Inserter::insert_link($doc['html'], array(
+    'phrase' => 'Entrepreneurs need capital',
+    'target_wp_post_id' => 11,
+    'permalink' => 'https://example.com/cap/',
+    'mutation_id' => 'vil_canon',
+));
+assert_true($ins_c['inserted'], 'insert into canonical html succeeds');
+
+// Thin content stays insufficient (no silent builder rewrite)
+$thin = (object) array(
+    'ID' => 12,
+    'post_content' => '<p>Hi</p>',
+    'post_modified_gmt' => '2026-10-22 00:00:00',
+);
+$doc_thin = Vernal_Internal_Link_Inserter::resolve_canonical_il_document($thin);
+assert_true($doc_thin['source_kind'] === 'insufficient_plain', 'very thin marked insufficient_plain');
+
+// Normalize phrase whitespace / entities
+$norm = Vernal_Internal_Link_Inserter::normalize_anchor_phrase("  Health &amp;  Wellness \n");
+assert_true($norm === 'Health & Wellness', 'normalize_anchor_phrase decodes entities');
+
+// Missing phrase disposition path
+$miss = Vernal_Internal_Link_Inserter::insert_link('<p>No match here</p>', array(
+    'phrase' => 'entrepreneurs need capital',
+    'target_wp_post_id' => 13,
+    'permalink' => 'https://example.com/x/',
+    'mutation_id' => 'vil_miss',
+));
+assert_true(!$miss['inserted'], 'missing phrase does not insert');
 
 if ($failed > 0) {
     echo "\n$failed failure(s)\n";

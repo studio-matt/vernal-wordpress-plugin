@@ -1077,9 +1077,9 @@ class Vernal_Internal_Links {
         }
 
         if ($analysis['vernal'] >= $max_vernal || $analysis['total'] >= $max_total) {
-            $bump('already_at_link_cap');
+            $bump('link_limit_reached');
             $out['duplicate_or_existing_edge']++;
-            $out['disposition'] = 'already_linked';
+            $out['disposition'] = 'link_limit_reached';
             $this->refresh_graph_stats_for_post($post->ID, false);
             return $out;
         }
@@ -1091,8 +1091,8 @@ class Vernal_Internal_Links {
             max(0, $max_total - (int) $analysis['total'])
         );
         if ($room < 1) {
-            $bump('already_at_link_cap');
-            $out['disposition'] = 'already_linked';
+            $bump('link_limit_reached');
+            $out['disposition'] = 'link_limit_reached';
             $this->refresh_graph_stats_for_post($post->ID, false);
             return $out;
         }
@@ -1111,7 +1111,27 @@ class Vernal_Internal_Links {
             $ledger_strategy = 'new_post_outbound';
         }
 
-        $content = $post->post_content;
+        $canon = Vernal_Internal_Link_Inserter::resolve_canonical_il_document($post);
+        $out['content_revision'] = $canon['revision'];
+        $out['content_source_kind'] = $canon['source_kind'];
+        $out['content_words'] = (int) $canon['words'];
+        if (!empty($canon['builder_locked']) && (int) $canon['words'] < 80) {
+            $bump('builder_content_not_mutable');
+            $out['disposition'] = 'insert_failed';
+            $out['note'] = 'Builder-managed body is too thin to insert safely';
+            $this->refresh_graph_stats_for_post($post->ID, false);
+            return $out;
+        }
+        if ((int) $canon['words'] < 15) {
+            $bump('insufficient_source_text');
+            $out['disposition'] = 'no_grounded_anchor';
+            $out['note'] = 'Canonical insertable text too short for grounding';
+            $this->refresh_graph_stats_for_post($post->ID, false);
+            return $out;
+        }
+
+        // Mutation substrate MUST be the same HTML used to derive content_text.
+        $content = (string) $canon['html'];
         $ledger = $this->get_ledger($post->ID);
         $inserted_this_pass = 0;
         $used_anchors = $this->used_anchor_texts_from_ledger($ledger);
@@ -1120,8 +1140,23 @@ class Vernal_Internal_Links {
         $saw_empty_machine = false;
 
         for ($attempt = 0; $attempt < $room; $attempt++) {
+            // Stale-content guard: if post changed under us, stop and remain retryable.
+            $fresh = get_post($post->ID);
+            if ($fresh) {
+                $fresh_canon = Vernal_Internal_Link_Inserter::resolve_canonical_il_document($fresh);
+                if ($fresh_canon['revision'] !== $canon['revision'] && $inserted_this_pass === 0) {
+                    $bump('content_revision_mismatch');
+                    $out['disposition'] = 'content_revision_mismatch';
+                    $out['note'] = 'Source content changed between load and match; retry with fresh content';
+                    break;
+                }
+            }
             $analysis = Vernal_Internal_Link_Inserter::analyze_internal_links($content);
             if ($analysis['vernal'] >= $max_vernal || $analysis['total'] >= $max_total) {
+                if ($inserted_this_pass === 0) {
+                    $bump('link_limit_reached');
+                    $out['disposition'] = 'link_limit_reached';
+                }
                 break;
             }
             $analysis_for_match = $analysis;
@@ -1136,7 +1171,7 @@ class Vernal_Internal_Links {
                 )
             );
 
-            $payload = $this->build_best_edge_payload($post, $settings, $dest_id, $analysis_for_match, $profile);
+            $payload = $this->build_best_edge_payload($post, $settings, $dest_id, $analysis_for_match, $profile, $canon);
             $resp = Vernal_Backend_API::request('plugin/internal-links/match', array(
                 'method'  => 'POST',
                 'body'    => $payload,
@@ -1146,29 +1181,44 @@ class Vernal_Internal_Links {
             if (is_wp_error($resp)) {
                 $out['errors']++;
                 $out['machine_request_failed']++;
-                $bump('machine_request_failed');
+                $bump('transient_machine_failure');
                 $out['note'] = 'machine_error: ' . $resp->get_error_message();
-                $out['disposition'] = 'transient_failure';
+                $out['disposition'] = 'transient_machine_failure';
                 // Transient Machine blips (deploy / 429) — do not stamp; remain retryable.
                 break;
             }
+            $out['match_meta'] = isset($resp['match_meta']) && is_array($resp['match_meta']) ? $resp['match_meta'] : array();
             $results = isset($resp['results']) && is_array($resp['results']) ? $resp['results'] : array();
             if (!$results) {
                 $out['semantic_targets_rejected']++;
                 if ($inserted_this_pass === 0 && !$saw_empty_machine) {
                     $diag = isset($resp['match_diagnostic']) ? sanitize_key((string) $resp['match_diagnostic']) : '';
+                    $meta = $out['match_meta'];
+                    $meta_note = '';
+                    if ($meta) {
+                        $meta_note = sprintf(
+                            ' [match_meta words=%s stubs=%s soft_max=%s vernal_out=%s]',
+                            isset($meta['content_text_words']) ? (string) $meta['content_text_words'] : '?',
+                            isset($meta['stub_count']) ? (string) $meta['stub_count'] : '?',
+                            isset($meta['soft_max']) ? (string) $meta['soft_max'] : '?',
+                            isset($meta['vernal_links_out']) ? (string) $meta['vernal_links_out'] : '?'
+                        );
+                    }
                     if ($diag === 'gated_empty') {
                         $bump('gated_empty');
-                        $out['note'] = 'Match pool existed but gates/score left no usable edge';
+                        $out['note'] = 'Match pool existed but gates/score left no usable edge' . $meta_note;
                         $out['disposition'] = 'no_grounded_anchor';
+                        $out['gate_reason'] = 'gated_empty';
                     } elseif ($diag === 'no_grounded_anchor') {
                         $bump('no_grounded_anchor');
-                        $out['note'] = 'Related targets existed but no usable link phrase in the article body';
+                        $out['note'] = 'Related targets existed but no usable link phrase in the article body' . $meta_note;
                         $out['disposition'] = 'no_grounded_anchor';
+                        $out['gate_reason'] = 'no_grounded_anchor';
                     } else {
                         $bump('no_machine_candidates');
-                        $out['note'] = 'Machine returned no candidates (empty index or no related articles)';
+                        $out['note'] = 'Machine returned no candidates (empty index or no related articles)' . $meta_note;
                         $out['disposition'] = 'no_grounded_anchor';
+                        $out['gate_reason'] = $diag !== '' ? $diag : 'no_machine_candidates';
                     }
                     $saw_empty_machine = true;
                 }
@@ -1204,7 +1254,8 @@ class Vernal_Internal_Links {
             $target_id = isset($row['target_wp_post_id']) ? (int) $row['target_wp_post_id'] : 0;
             if (!$this->is_valid_target($target_id, $settings, $post->ID)) {
                 $out['semantic_targets_rejected']++;
-                $bump('invalid_or_excluded_target');
+                $bump('invalid_destination');
+                $out['disposition'] = 'invalid_destination';
                 if ($target_id > 0) {
                     $skip_targets[] = $target_id;
                 }
@@ -1291,16 +1342,22 @@ class Vernal_Internal_Links {
             }
             if (empty($ins['inserted'])) {
                 $out['insert_failed']++;
-                $reason = isset($ins['reason']) ? (string) $ins['reason'] : 'phrase_not_found_in_body';
-                // Map inserter reasons to admin-facing skip codes.
-                if (in_array($reason, array('phrase_not_found_eligible', 'phrase_not_in_safe_blocks', 'empty', 'mask_failed'), true)) {
-                    $reason = 'phrase_not_found_in_body';
+                $reason = isset($ins['reason']) ? (string) $ins['reason'] : 'anchor_not_found';
+                // Map inserter reasons to durable disposition codes (compat aliases kept).
+                if (in_array($reason, array('phrase_not_found_eligible', 'phrase_not_in_safe_blocks', 'empty', 'mask_failed', 'phrase_not_found_in_body'), true)) {
+                    $reason = 'anchor_not_found';
+                    $out['disposition'] = 'anchor_not_found';
                 } elseif ($reason === 'already_vernal_target' || $reason === 'already_href') {
-                    $reason = 'duplicate_or_existing_edge';
+                    $reason = 'already_linked';
+                    $out['disposition'] = 'already_linked';
+                    $out['duplicate_or_existing_edge']++;
                 } elseif ($reason === 'banned_anchor') {
                     $reason = 'anchor_rejected';
+                    $out['disposition'] = 'insert_failed';
+                } else {
+                    $out['disposition'] = 'insert_failed';
                 }
-                $bump($reason !== '' ? $reason : 'phrase_not_found_in_body');
+                $bump($reason !== '' ? $reason : 'anchor_not_found');
                 $skip_targets[] = $target_id;
                 continue;
             }
@@ -1352,10 +1409,18 @@ class Vernal_Internal_Links {
                 $out['note'] = $keys ? (string) $keys[0] : 'skipped';
             }
             if (($out['disposition'] ?? '') === 'permanent_failure') {
-                if (!empty($out['skip_reasons']['no_grounded_anchor']) || !empty($out['skip_reasons']['gated_empty'])) {
+                if (!empty($out['skip_reasons']['no_grounded_anchor']) || !empty($out['skip_reasons']['gated_empty']) || !empty($out['skip_reasons']['insufficient_source_text'])) {
                     $out['disposition'] = 'no_grounded_anchor';
-                } elseif (!empty($out['skip_reasons']['duplicate_or_existing_edge']) || !empty($out['skip_reasons']['already_at_link_cap'])) {
+                } elseif (!empty($out['skip_reasons']['already_linked']) || !empty($out['skip_reasons']['duplicate_or_existing_edge'])) {
                     $out['disposition'] = 'already_linked';
+                } elseif (!empty($out['skip_reasons']['link_limit_reached']) || !empty($out['skip_reasons']['already_at_link_cap'])) {
+                    $out['disposition'] = 'link_limit_reached';
+                } elseif (!empty($out['skip_reasons']['anchor_not_found']) || !empty($out['skip_reasons']['phrase_not_found_in_body'])) {
+                    $out['disposition'] = 'anchor_not_found';
+                } elseif (!empty($out['skip_reasons']['transient_machine_failure']) || !empty($out['skip_reasons']['machine_request_failed'])) {
+                    $out['disposition'] = 'transient_machine_failure';
+                } elseif (!empty($out['skip_reasons']['invalid_destination']) || !empty($out['skip_reasons']['invalid_or_excluded_target'])) {
+                    $out['disposition'] = 'invalid_destination';
                 }
             }
         }
@@ -1389,7 +1454,12 @@ class Vernal_Internal_Links {
         $before_vernal = Vernal_Internal_Link_Inserter::analyze_internal_links($before);
         $result = $this->process_source_outbound($post, $settings, $run_id, $dest_id, 'manual_run');
         $disposition = isset($result['disposition']) ? (string) $result['disposition'] : 'permanent_failure';
-        if ($disposition !== 'transient_failure' && empty($result['errors'])) {
+        $retryable = in_array(
+            $disposition,
+            array('transient_failure', 'transient_machine_failure', 'content_revision_mismatch'),
+            true
+        );
+        if (!$retryable && empty($result['errors'])) {
             $this->stamp_source_pass($post_id, !empty($result['linked']));
         }
         $fresh = get_post($post_id);
@@ -1411,6 +1481,7 @@ class Vernal_Internal_Links {
             'source_wp_post_id'     => $post_id,
             'source_url'            => get_permalink($post_id),
             'disposition'           => $disposition,
+            'gate_reason'           => isset($result['gate_reason']) ? (string) $result['gate_reason'] : '',
             'linked'                => (int) ($result['linked'] ?? 0),
             'skip_reasons'          => isset($result['skip_reasons']) ? $result['skip_reasons'] : array(),
             'inserted_edges'        => isset($result['inserted_edges']) ? $result['inserted_edges'] : array(),
@@ -1418,8 +1489,108 @@ class Vernal_Internal_Links {
             'vernal_links_after'    => (int) $after_vernal['vernal'],
             'persisted_vernal_anchors' => $persisted,
             'content_changed'       => ($before !== $after),
+            'content_revision'      => isset($result['content_revision']) ? (string) $result['content_revision'] : '',
+            'content_source_kind'   => isset($result['content_source_kind']) ? (string) $result['content_source_kind'] : '',
+            'content_words'         => isset($result['content_words']) ? (int) $result['content_words'] : 0,
+            'match_meta'            => isset($result['match_meta']) ? $result['match_meta'] : array(),
             'note'                  => isset($result['note']) ? (string) $result['note'] : '',
             'machine_request_failed'=> (int) ($result['machine_request_failed'] ?? 0),
+            'retryable'             => $retryable,
+        );
+    }
+
+    /**
+     * Dry-run diagnose: canonical content + Machine match without mutating the post.
+     *
+     * @param int $post_id
+     * @return array
+     */
+    public function diagnose_source_for_api($post_id) {
+        $post_id = (int) $post_id;
+        $settings = self::get_settings();
+        $post = get_post($post_id);
+        if (!$post) {
+            return array('ok' => false, 'reason' => 'not_found');
+        }
+        $resolved = self::resolve_social_destination(true);
+        $dest_id = (int) ($resolved['id'] ?? 0);
+        $canon = Vernal_Internal_Link_Inserter::resolve_canonical_il_document($post);
+        $analysis = Vernal_Internal_Link_Inserter::analyze_internal_links((string) $canon['html']);
+        $profile = $this->resolve_link_profile($post, $settings);
+        $payload = null;
+        $machine = null;
+        if ($dest_id > 0) {
+            $payload = $this->build_best_edge_payload($post, $settings, $dest_id, $analysis, $profile, $canon);
+            $resp = Vernal_Backend_API::request('plugin/internal-links/match', array(
+                'method'  => 'POST',
+                'body'    => $payload,
+                'timeout' => 90,
+                'retries' => 2,
+            ));
+            if (is_wp_error($resp)) {
+                $machine = array(
+                    'ok' => false,
+                    'disposition' => 'transient_machine_failure',
+                    'error' => $resp->get_error_message(),
+                );
+            } else {
+                $results = isset($resp['results']) && is_array($resp['results']) ? $resp['results'] : array();
+                $row = $results ? $results[0] : null;
+                $machine = array(
+                    'ok' => true,
+                    'match_diagnostic' => isset($resp['match_diagnostic']) ? $resp['match_diagnostic'] : null,
+                    'match_meta' => isset($resp['match_meta']) ? $resp['match_meta'] : array(),
+                    'n_results' => count($results),
+                    'result0' => $row,
+                );
+            }
+        }
+        $public_html = '';
+        $permalink = get_permalink($post);
+        if (is_string($permalink) && $permalink !== '') {
+            $pr = wp_remote_get($permalink, array('timeout' => 30, 'user-agent' => 'VernalILDiagnose/1.5.36'));
+            if (!is_wp_error($pr)) {
+                $public_html = (string) wp_remote_retrieve_body($pr);
+            }
+        }
+        $phrase_in_canon = null;
+        $phrase_in_public = null;
+        if (is_array($machine) && !empty($machine['result0']['anchors'][0]['text'])) {
+            $ph = Vernal_Internal_Link_Inserter::normalize_anchor_phrase($machine['result0']['anchors'][0]['text']);
+            $phrase_in_canon = ($ph !== '' && stripos((string) $canon['plain'], $ph) !== false);
+            $pub_plain = Vernal_Internal_Link_Inserter::insertable_plain_text($public_html);
+            $phrase_in_public = ($ph !== '' && stripos($pub_plain, $ph) !== false);
+        }
+        return array(
+            'ok' => true,
+            'plugin_version' => defined('VERNAL_CONTENTUM_VERSION') ? VERNAL_CONTENTUM_VERSION : '',
+            'social_destination_id' => $dest_id,
+            'source_wp_post_id' => $post_id,
+            'source_url' => $permalink,
+            'canonical' => array(
+                'source_kind' => $canon['source_kind'],
+                'words' => (int) $canon['words'],
+                'revision' => $canon['revision'],
+                'builder_locked' => !empty($canon['builder_locked']),
+                'raw_chars' => (int) $canon['raw_chars'],
+                'html_chars' => (int) $canon['html_chars'],
+                'plain_sample' => substr((string) $canon['plain'], 0, 240),
+            ),
+            'vernal_links' => (int) $analysis['vernal'],
+            'profile' => $profile,
+            'payload_source' => is_array($payload) ? array(
+                'content_text_words' => str_word_count((string) ($payload['source']['content_text'] ?? '')),
+                'content_revision' => isset($payload['source']['content_revision']) ? $payload['source']['content_revision'] : '',
+                'content_source_kind' => isset($payload['source']['content_source_kind']) ? $payload['source']['content_source_kind'] : '',
+                'soft_max' => isset($payload['soft_max']) ? (int) $payload['soft_max'] : null,
+                'vernal_links_out' => isset($payload['vernal_links_out']) ? (int) $payload['vernal_links_out'] : null,
+                'stub_count' => isset($payload['candidate_stubs']) && is_array($payload['candidate_stubs']) ? count($payload['candidate_stubs']) : 0,
+                'min_score' => isset($payload['min_score']) ? (float) $payload['min_score'] : null,
+            ) : null,
+            'machine' => $machine,
+            'phrase_in_canonical_plain' => $phrase_in_canon,
+            'phrase_in_public_plain' => $phrase_in_public,
+            'public_chars' => strlen($public_html),
         );
     }
 
@@ -1619,16 +1790,15 @@ class Vernal_Internal_Links {
         );
     }
 
-    private function build_best_edge_payload($post, $settings, $dest_id, $analysis, $profile) {
+    private function build_best_edge_payload($post, $settings, $dest_id, $analysis, $profile, $canon = null) {
         $inbound_counts = $this->estimate_inbound_counts($settings);
         $slots = $this->slots_from_ledger($post->ID);
         $ledger = $this->get_ledger($post->ID);
         $stats = $this->get_graph_stats($post->ID);
-        $source = $this->post_to_match_source($post);
+        $source = $this->post_to_match_source($post, $canon);
         $source['cluster_role'] = isset($stats['cluster_role']) ? (string) $stats['cluster_role'] : 'standalone';
         $source['topic_cluster_key'] = isset($stats['topic_cluster_key']) ? (string) $stats['topic_cluster_key'] : '';
         $source['cornerstone_wp_post_id'] = isset($stats['cornerstone_wp_post_id']) ? (int) $stats['cornerstone_wp_post_id'] : 0;
-        $source['word_count'] = str_word_count(wp_strip_all_tags($post->post_content));
         $source['primary_search_intent'] = isset($stats['primary_search_intent']) ? (string) $stats['primary_search_intent'] : '';
         if (in_array((int) $post->ID, self::normalize_id_list($settings['pillar_post_ids']), true)) {
             $source['cluster_role'] = 'pillar';
@@ -1647,6 +1817,7 @@ class Vernal_Internal_Links {
             'candidate_stubs'            => $this->build_candidate_stubs($settings, 40, array( (int) $post->ID )),
             'graph_stats'                => $stats,
             'rag_excluded_category_ids'  => $this->rag_excluded_category_ids_for_match(),
+            'content_revision'           => isset($source['content_revision']) ? (string) $source['content_revision'] : '',
         );
     }
 
@@ -1691,34 +1862,26 @@ class Vernal_Internal_Links {
         return array($primary, array_slice($secondary, 0, 12));
     }
 
-    private function post_to_match_source($post) {
+    private function post_to_match_source($post, $canon = null) {
         $cats = wp_get_post_categories($post->ID);
         list($primary_kp, $secondary_kp) = $this->post_seo_keyphrases($post);
-        $insertable = Vernal_Internal_Link_Inserter::insertable_plain_text($post->post_content);
-        // Builders / filters: raw post_content can be thin while the_content is full.
-        // Prefer insertable text the inserter can wrap; fall back to filtered body
-        // when raw yields almost nothing (otherwise Machine returns gated_empty).
-        if (str_word_count($insertable) < 80 && function_exists('apply_filters')) {
-            $rendered = apply_filters('the_content', $post->post_content);
-            if (is_string($rendered) && $rendered !== '') {
-                $from_rendered = Vernal_Internal_Link_Inserter::insertable_plain_text($rendered);
-                if (str_word_count($from_rendered) > str_word_count($insertable)) {
-                    $insertable = $from_rendered;
-                }
-            }
+        if (!is_array($canon) || empty($canon['plain'])) {
+            $canon = Vernal_Internal_Link_Inserter::resolve_canonical_il_document($post);
         }
         return array(
             'wp_post_id'            => (int) $post->ID,
             'title'                 => get_the_title($post),
             'excerpt'               => get_the_excerpt($post),
-            // Ground only against text the inserter can actually wrap.
-            'content_text'          => $insertable,
+            // Ground only against text from the same HTML the inserter will mutate.
+            'content_text'          => (string) $canon['plain'],
+            'content_revision'      => (string) $canon['revision'],
+            'content_source_kind'   => (string) $canon['source_kind'],
             'category_ids'          => array_map('intval', $cats),
             'permalink'             => get_permalink($post),
             'primary_keyphrase'     => $primary_kp,
             'secondary_keyphrases'  => $secondary_kp,
             'published_at'          => $post->post_date_gmt,
-            'word_count'            => str_word_count($insertable),
+            'word_count'            => (int) $canon['words'],
         );
     }
 
@@ -2377,13 +2540,21 @@ class Vernal_Internal_Links {
             'no_eligible_sources'       => __('No eligible articles this pass (cooldown, exclusions, or filters)', 'vernal-contentum'),
             'already_at_link_cap'       => __('Article already at max links', 'vernal-contentum'),
             'machine_request_failed'    => __('Could not reach Vernal match API', 'vernal-contentum'),
+            'transient_machine_failure' => __('Could not reach Vernal match API (temporary)', 'vernal-contentum'),
             'no_machine_candidates'     => __('Vernal found no related article (often empty RAG index)', 'vernal-contentum'),
             'gated_empty'               => __('Related articles existed but were filtered out by score, caps, or linking rules', 'vernal-contentum'),
             'below_min_relevance'       => __('Best match scored below minimum relatedness', 'vernal-contentum'),
             'invalid_or_excluded_target'=> __('Suggested target was invalid or excluded', 'vernal-contentum'),
+            'invalid_destination'       => __('Suggested target was invalid or excluded', 'vernal-contentum'),
             'no_grounded_anchor'        => __('No usable link phrase in the article body', 'vernal-contentum'),
             'anchor_rejected'           => __('Link phrase was generic or already used', 'vernal-contentum'),
             'phrase_not_found_in_body'  => __('Suggested phrase was not found in the article text', 'vernal-contentum'),
+            'anchor_not_found'          => __('Suggested phrase was not found in insertable article HTML', 'vernal-contentum'),
+            'link_limit_reached'        => __('Article already at max links', 'vernal-contentum'),
+            'already_linked'            => __('Destination already linked from this article', 'vernal-contentum'),
+            'content_revision_mismatch' => __('Article changed during linking; will retry', 'vernal-contentum'),
+            'insufficient_source_text'  => __('Article text too short for safe linking', 'vernal-contentum'),
+            'builder_content_not_mutable' => __('Builder-managed content cannot be linked safely', 'vernal-contentum'),
         );
         return isset($map[$code]) ? $map[$code] : (string) $code;
     }
