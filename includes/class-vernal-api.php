@@ -1515,7 +1515,21 @@ class Vernal_API {
             return $result;
         }
         if ($result === false) {
-            return new WP_Error('upgrade_failed', __('Plugin upgrade failed', 'vernal-contentum'), array('status' => 500));
+            $msgs = array();
+            if (is_object($skin) && method_exists($skin, 'get_errors')) {
+                $err = $skin->get_errors();
+                if (is_wp_error($err) && $err->has_errors()) {
+                    $msgs = $err->get_error_messages();
+                }
+            }
+            if (is_object($skin) && method_exists($skin, 'get_error_messages')) {
+                $msgs = array_merge($msgs, (array) $skin->get_error_messages());
+            }
+            return new WP_Error(
+                'upgrade_failed',
+                __('Plugin upgrade failed', 'vernal-contentum') . ($msgs ? (': ' . implode('; ', $msgs)) : ''),
+                array('status' => 500, 'messages' => $msgs)
+            );
         }
 
         activate_plugin('vernal-contentum/vernal-contentum.php');

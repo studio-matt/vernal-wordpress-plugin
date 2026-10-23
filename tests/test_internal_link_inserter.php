@@ -202,6 +202,11 @@ $miss = Vernal_Internal_Link_Inserter::insert_link('<p>No match here</p>', array
 ));
 assert_true(!$miss['inserted'], 'missing phrase does not insert');
 
+// Live Vernal analysis: zero links ⇒ slot accounting must not invent filled roles
+$zero = Vernal_Internal_Link_Inserter::analyze_internal_links('<p>No links here at all.</p>');
+assert_true((int) $zero['vernal'] === 0, 'zero content has no vernal links');
+assert_true(count($zero['target_ids']) === 0, 'zero content has no target ids');
+
 if ($failed > 0) {
     echo "\n$failed failure(s)\n";
     exit(1);

@@ -1064,6 +1064,9 @@ class Vernal_Internal_Links {
             }
         };
 
+        // Prune stale ledger before caps / Machine slots (see reconcile_ledger_with_content).
+        $this->reconcile_ledger_with_content($post->ID, (string) $post->post_content);
+
         $analysis = Vernal_Internal_Link_Inserter::analyze_internal_links($post->post_content);
         $profile = $this->resolve_link_profile($post, $settings);
         $max_vernal = (int) $profile['soft_max'];
@@ -2040,6 +2043,59 @@ class Vernal_Internal_Links {
         return $profile;
     }
 
+    /**
+     * Drop ledger rows that are not present as live Vernal anchors in content.
+     * Stale META_LINKS (other_relevant=7 with vernal_links=0) was producing
+     * Machine gated_empty via ROLE_MAXIMA other_relevant=2.
+     *
+     * @param int         $post_id
+     * @param string|null $content
+     * @return array
+     */
+    public function reconcile_ledger_with_content($post_id, $content = null) {
+        $post_id = (int) $post_id;
+        if ($content === null) {
+            $post = get_post($post_id);
+            $content = $post ? (string) $post->post_content : '';
+        }
+        $content = (string) $content;
+        $analysis = Vernal_Internal_Link_Inserter::analyze_internal_links($content);
+        $live_targets = array();
+        foreach ((array) $analysis['target_ids'] as $tid) {
+            $live_targets[(int) $tid] = true;
+        }
+        $live_mutation_ids = array();
+        if (preg_match_all('/data-vernal-il-id=["\']([^"\']+)["\']/', $content, $mm)) {
+            foreach ($mm[1] as $mid) {
+                $live_mutation_ids[(string) $mid] = true;
+            }
+        }
+
+        $ledger = $this->get_ledger($post_id);
+        $kept = array();
+        if ((int) $analysis['vernal'] > 0) {
+            foreach ($ledger as $e) {
+                if (!is_array($e)) {
+                    continue;
+                }
+                $mid = isset($e['id']) ? (string) $e['id'] : '';
+                $tid = isset($e['target_wp_post_id']) ? (int) $e['target_wp_post_id'] : 0;
+                if ($mid !== '' && isset($live_mutation_ids[$mid])) {
+                    $kept[] = $e;
+                    continue;
+                }
+                if ($tid > 0 && isset($live_targets[$tid])) {
+                    $kept[] = $e;
+                }
+            }
+        }
+
+        if (count($kept) !== count($ledger)) {
+            update_post_meta($post_id, self::META_LINKS, wp_json_encode(array_values($kept)));
+        }
+        return $kept;
+    }
+
     public function slots_from_ledger($post_id) {
         $slots = array(
             'cornerstone_up'   => 0,
@@ -2048,7 +2104,7 @@ class Vernal_Internal_Links {
             'underlinked'      => 0,
             'other_relevant'   => 0,
         );
-        foreach ($this->get_ledger($post_id) as $e) {
+        foreach ($this->reconcile_ledger_with_content($post_id) as $e) {
             $role = isset($e['edge_role']) ? (string) $e['edge_role'] : 'other_relevant';
             if (!isset($slots[$role])) {
                 $role = 'other_relevant';
@@ -2111,6 +2167,7 @@ class Vernal_Internal_Links {
         }
         $settings = self::get_settings();
         $analysis = Vernal_Internal_Link_Inserter::analyze_internal_links($post->post_content);
+        $ledger = $this->reconcile_ledger_with_content($post_id, (string) $post->post_content);
         $stats = $this->get_graph_stats($post_id);
         $profile = $this->resolve_link_profile($post, $settings);
         $slots = $this->slots_from_ledger($post_id);
@@ -2120,7 +2177,7 @@ class Vernal_Internal_Links {
         $stats['contextual_links_out'] = (int) $analysis['total'];
         $stats['vernal_links_out'] = (int) $analysis['vernal'];
         $stats['orphan_status'] = ($analysis['vernal'] === 0 && $inbound === 0);
-        $stats['anchor_texts_used'] = $this->used_anchor_texts_from_ledger($this->get_ledger($post_id));
+        $stats['anchor_texts_used'] = $this->used_anchor_texts_from_ledger($ledger);
         $stats['slots_filled_by_role'] = $slots;
         $stats['link_health'] = $this->compute_link_health_label($post, $settings, $analysis, $inbound, $profile, $slots);
         $stats['last_graph_evaluated_at'] = gmdate('c');
