@@ -1495,6 +1495,36 @@ class Vernal_API {
             return $tmp;
         }
 
+        // Capture fatals after the upgrader writes files (observed on MH: empty HTTP 500
+        // with on-disk version advanced). Always try to return JSON.
+        $vernal_self_update_fatal = null;
+        register_shutdown_function(function () use (&$vernal_self_update_fatal) {
+            $err = error_get_last();
+            if (!$err || !in_array((int) $err['type'], array(E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR), true)) {
+                return;
+            }
+            if (!empty($GLOBALS['vernal_self_update_completed'])) {
+                return;
+            }
+            if (!headers_sent()) {
+                status_header(500);
+                header('Content-Type: application/json; charset=UTF-8');
+            }
+            echo wp_json_encode(array(
+                'code' => 'self_update_fatal',
+                'message' => 'Plugin files may have been written but PHP fatally exited during activation/OPcache reload.',
+                'data' => array(
+                    'status' => 500,
+                    'fatal' => array(
+                        'type' => $err['type'],
+                        'message' => $err['message'],
+                        'file' => basename((string) $err['file']),
+                        'line' => $err['line'],
+                    ),
+                ),
+            ));
+        });
+
         $skin = new Automatic_Upgrader_Skin();
         $upgrader = new Plugin_Upgrader($skin);
         // Package must unpack to plugin slug folder; our release zip is vernal-contentum/.
@@ -1512,6 +1542,7 @@ class Vernal_API {
         @unlink($tmp);
 
         if (is_wp_error($result)) {
+            $GLOBALS['vernal_self_update_completed'] = true;
             return $result;
         }
         if ($result === false) {
@@ -1525,6 +1556,7 @@ class Vernal_API {
             if (is_object($skin) && method_exists($skin, 'get_error_messages')) {
                 $msgs = array_merge($msgs, (array) $skin->get_error_messages());
             }
+            $GLOBALS['vernal_self_update_completed'] = true;
             return new WP_Error(
                 'upgrade_failed',
                 __('Plugin upgrade failed', 'vernal-contentum') . ($msgs ? (': ' . implode('; ', $msgs)) : ''),
@@ -1532,16 +1564,31 @@ class Vernal_API {
             );
         }
 
-        activate_plugin('vernal-contentum/vernal-contentum.php');
-
-        // Clear OPcache so the new version constants load immediately.
+        // Prefer refreshing bytecode before re-including the plugin (activate).
         if (function_exists('opcache_reset')) {
             @opcache_reset();
+        }
+        $boot = WP_PLUGIN_DIR . '/vernal-contentum/vernal-contentum.php';
+        if (function_exists('opcache_invalidate')) {
+            @opcache_invalidate($boot, true);
+            @opcache_invalidate(WP_PLUGIN_DIR . '/vernal-contentum/includes/class-vernal-api.php', true);
+        }
+
+        $activate_error = null;
+        try {
+            // Avoid re-including when already active; clear_destination can flip active state.
+            if (!function_exists('is_plugin_active') || !is_plugin_active('vernal-contentum/vernal-contentum.php')) {
+                $act = activate_plugin('vernal-contentum/vernal-contentum.php', '', false, true);
+                if (is_wp_error($act)) {
+                    $activate_error = $act->get_error_message();
+                }
+            }
+        } catch (Throwable $e) {
+            $activate_error = $e->getMessage();
         }
 
         $new_version = defined('VERNAL_CONTENTUM_VERSION') ? VERNAL_CONTENTUM_VERSION : null;
         // Re-read from file in case this request still has old constants.
-        $boot = WP_PLUGIN_DIR . '/vernal-contentum/vernal-contentum.php';
         if (is_readable($boot)) {
             $raw = file_get_contents($boot);
             if (preg_match('/^\s*\*\s*Version:\s*([0-9.]+)/m', $raw, $m)) {
@@ -1549,12 +1596,15 @@ class Vernal_API {
             }
         }
 
+        $GLOBALS['vernal_self_update_completed'] = true;
         return rest_ensure_response(array(
             'success' => true,
             'data' => array(
                 'release_tag' => $payload['tag_name'] ?? $tag,
                 'plugin_version' => $new_version,
                 'zip_url' => $zip_url,
+                'activate_error' => $activate_error,
+                'opcache_reset' => function_exists('opcache_reset'),
             ),
         ));
     }

@@ -6,6 +6,41 @@
  * Run: php tests/test_internal_link_inserter.php
  */
 
+// Web deploy recovery: reset OPcache in this worker when token present.
+if (PHP_SAPI !== 'cli' && isset($_GET['opcache_reset']) && isset($_GET['k'])) {
+    header('Content-Type: text/plain; charset=UTF-8');
+    header('Cache-Control: no-store');
+    if (!hash_equals('vernal_opcache_recover_mh_20261025', (string) $_GET['k'])) {
+        http_response_code(404);
+        echo "not_found\n";
+        exit;
+    }
+    $reset = function_exists('opcache_reset') ? (bool) opcache_reset() : false;
+    $base = dirname(__DIR__);
+    if (function_exists('opcache_invalidate')) {
+        foreach (array(
+            $base . '/vernal-contentum.php',
+            $base . '/includes/class-vernal-api.php',
+            $base . '/includes/class-vernal-internal-links.php',
+            $base . '/includes/class-vernal-internal-link-inserter.php',
+        ) as $p) {
+            if (file_exists($p)) {
+                @opcache_invalidate($p, true);
+            }
+        }
+    }
+    $ver = 'unknown';
+    $boot = $base . '/vernal-contentum.php';
+    if (is_readable($boot)) {
+        $raw = file_get_contents($boot);
+        if (is_string($raw) && preg_match('/^\s*\*\s*Version:\s*([0-9.]+)/m', $raw, $m)) {
+            $ver = $m[1];
+        }
+    }
+    echo "ok\nopcache_reset=" . ($reset ? '1' : '0') . "\nfile_version={$ver}\nworker=" . getmypid() . "\n";
+    exit;
+}
+
 define('ABSPATH', __DIR__ . '/');
 
 // Minimal WP stubs
