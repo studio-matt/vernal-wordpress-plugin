@@ -1527,16 +1527,27 @@ class Vernal_API {
 
         $skin = new Automatic_Upgrader_Skin();
         $upgrader = new Plugin_Upgrader($skin);
-        // Package must unpack to plugin slug folder; our release zip is vernal-contentum/.
+        // Update the directory WordPress actually has active. MH historically
+        // activated a GitHub source folder (vernal-wordpress-plugin-main/) while
+        // older self-update code always wrote vernal-contentum/ — leaving runtime
+        // stuck on the stale tree.
+        $active_basename = defined('VERNAL_CONTENTUM_PLUGIN_BASENAME')
+            ? VERNAL_CONTENTUM_PLUGIN_BASENAME
+            : plugin_basename(dirname(__DIR__) . '/vernal-contentum.php');
+        $active_slug = dirname($active_basename);
+        if ($active_slug === '.' || $active_slug === '' || $active_slug === DIRECTORY_SEPARATOR) {
+            $active_slug = 'vernal-contentum';
+            $active_basename = 'vernal-contentum/vernal-contentum.php';
+        }
         $result = $upgrader->run(array(
             'package' => $tmp,
-            'destination' => WP_PLUGIN_DIR . '/vernal-contentum',
+            'destination' => WP_PLUGIN_DIR . '/' . $active_slug,
             'clear_destination' => true,
             'clear_working' => true,
             'hook_extra' => array(
                 'type' => 'plugin',
                 'action' => 'update',
-                'plugin' => 'vernal-contentum/vernal-contentum.php',
+                'plugin' => $active_basename,
             ),
         ));
         @unlink($tmp);
