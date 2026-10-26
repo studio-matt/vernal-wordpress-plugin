@@ -1,13 +1,9 @@
 <?php
 /**
- * Deploy recovery: OPcache status + optional one-shot mu-plugin installer.
+ * Deploy recovery: OPcache/status probe + one-shot mu-plugin installer.
  *
- * MH 2026-10: self-update writes 1.5.3x files but REST keeps serving 1.5.33 because
- * direct hits to this script do not share the WordPress PHP-FPM OPcache context
- * (opcache_reset returns false here). Installing a tiny mu-plugin forces
- * opcache_reset() on the next WP front/admin request in the real pool.
- *
- * Token-gated. Remove after recovery. Not loaded by WordPress itself.
+ * Writes mu-plugin to wp-content/mu-plugins/ (NOT plugins/mu-plugins).
+ * Token-gated. Remove after recovery.
  */
 header('Content-Type: text/plain; charset=UTF-8');
 header('Cache-Control: no-store');
@@ -20,10 +16,15 @@ if ($token === '' || !hash_equals($expect, $token)) {
     exit;
 }
 
-$base = dirname(__DIR__); // .../plugins/vernal-contentum
-$wp_content = dirname($base); // .../wp-content
+$base = dirname(__DIR__); // .../wp-content/plugins/vernal-contentum
+$wp_content = dirname($base, 2); // .../wp-content  (NOT dirname once — that is plugins/)
+if (!is_dir($wp_content) || basename($wp_content) !== 'wp-content') {
+    // Fallback for older PHP without dirname levels / odd layouts.
+    $wp_content = dirname(dirname($base));
+}
 $mu_dir = $wp_content . '/mu-plugins';
 $mu_file = $mu_dir . '/vernal-opcache-recover.php';
+$diag_file = $wp_content . '/uploads/vernal-opcache-recover-diag.json';
 
 $paths = array(
     $base . '/vernal-contentum.php',
@@ -45,43 +46,75 @@ if ($action === 'install_mu') {
     $mu = <<<'PHP'
 <?php
 /**
- * One-shot Vernal OPcache recovery. Self-deletes after first successful load.
- * Safe to leave; removes itself.
+ * One-shot Vernal runtime identity + OPcache recovery. Self-deletes after plugins_loaded.
  */
-if (!function_exists('vernal_opcache_recover_mu_run')) {
-    function vernal_opcache_recover_mu_run() {
-        $reset = false;
-        if (function_exists('opcache_reset')) {
-            $reset = (bool) @opcache_reset();
-        }
-        $plugin = WP_PLUGIN_DIR . '/vernal-contentum';
-        $targets = array(
-            $plugin . '/vernal-contentum.php',
-            $plugin . '/includes/class-vernal-api.php',
-            $plugin . '/includes/class-vernal-internal-links.php',
-            $plugin . '/includes/class-vernal-internal-link-inserter.php',
-        );
-        $n = 0;
-        if (function_exists('opcache_invalidate')) {
-            foreach ($targets as $t) {
-                if (is_string($t) && $t !== '' && file_exists($t)) {
-                    if (@opcache_invalidate($t, true)) {
-                        $n++;
-                    }
-                }
+add_action('plugins_loaded', function () {
+    $reset = false;
+    if (function_exists('opcache_reset')) {
+        $reset = (bool) @opcache_reset();
+    }
+    $n = 0;
+    if (function_exists('opcache_invalidate') && defined('WP_PLUGIN_DIR')) {
+        foreach (array(
+            WP_PLUGIN_DIR . '/vernal-contentum/vernal-contentum.php',
+            WP_PLUGIN_DIR . '/vernal-contentum/includes/class-vernal-api.php',
+            WP_PLUGIN_DIR . '/vernal-contentum/includes/class-vernal-internal-links.php',
+            WP_PLUGIN_DIR . '/vernal-contentum/includes/class-vernal-internal-link-inserter.php',
+        ) as $t) {
+            if (is_string($t) && file_exists($t) && @opcache_invalidate($t, true)) {
+                $n++;
             }
         }
-        if (!defined('VERNAL_OPCACHE_RECOVER_DONE')) {
-            define('VERNAL_OPCACHE_RECOVER_DONE', ($reset ? '1' : '0') . ':' . $n);
-        }
-        // Self-delete so we do not keep running.
-        $self = __FILE__;
-        if (is_string($self) && $self !== '' && strpos($self, 'vernal-opcache-recover.php') !== false) {
-            @unlink($self);
+    }
+
+    $active = array();
+    if (function_exists('get_option')) {
+        $raw = get_option('active_plugins', array());
+        if (is_array($raw)) {
+            $active = $raw;
         }
     }
-    vernal_opcache_recover_mu_run();
-}
+
+    $boot = defined('WP_PLUGIN_DIR') ? (WP_PLUGIN_DIR . '/vernal-contentum/vernal-contentum.php') : '';
+    $file_ver = null;
+    if (is_string($boot) && is_readable($boot)) {
+        $raw = file_get_contents($boot);
+        if (is_string($raw) && preg_match('/^\s*\*\s*Version:\s*([0-9.]+)/m', $raw, $m)) {
+            $file_ver = $m[1];
+        }
+    }
+
+    $diag = array(
+        'ts' => gmdate('c'),
+        'runtime_version' => defined('VERNAL_CONTENTUM_VERSION') ? VERNAL_CONTENTUM_VERSION : null,
+        'file_version' => $file_ver,
+        'plugin_dir' => defined('VERNAL_CONTENTUM_PLUGIN_DIR') ? VERNAL_CONTENTUM_PLUGIN_DIR : null,
+        'plugin_basename' => defined('VERNAL_CONTENTUM_PLUGIN_BASENAME') ? VERNAL_CONTENTUM_PLUGIN_BASENAME : null,
+        'active_plugins' => $active,
+        'opcache_reset' => $reset ? 1 : 0,
+        'opcache_invalidate_n' => $n,
+        'opcache_enabled' => (function_exists('opcache_get_status') && ($st = @opcache_get_status(false)) && !empty($st['opcache_enabled'])) ? 1 : 0,
+        'php' => PHP_VERSION,
+        'sapi' => PHP_SAPI,
+        'worker' => getmypid(),
+    );
+
+    if (!headers_sent()) {
+        header('X-Vernal-Runtime-Version: ' . (string) ($diag['runtime_version'] ?: 'none'));
+        header('X-Vernal-File-Version: ' . (string) ($diag['file_version'] ?: 'none'));
+        header('X-Vernal-Opcache-Reset: ' . (string) $diag['opcache_reset']);
+    }
+
+    $uploads = defined('WP_CONTENT_DIR') ? (WP_CONTENT_DIR . '/uploads/vernal-opcache-recover-diag.json') : '';
+    if (is_string($uploads) && $uploads !== '') {
+        @file_put_contents($uploads, wp_json_encode($diag));
+    }
+
+    $self = __FILE__;
+    if (is_string($self) && strpos($self, 'vernal-opcache-recover.php') !== false) {
+        @unlink($self);
+    }
+}, 0);
 PHP;
     $ok = @file_put_contents($mu_file, $mu);
     echo "ok\n";
@@ -90,6 +123,7 @@ PHP;
     echo "bytes=" . ($ok !== false ? (int) $ok : 0) . "\n";
     echo "mu_file=" . $mu_file . "\n";
     echo "mu_exists=" . (file_exists($mu_file) ? '1' : '0') . "\n";
+    echo "wp_content=" . $wp_content . "\n";
     exit;
 }
 
@@ -98,10 +132,27 @@ if ($action === 'remove_mu') {
     if (file_exists($mu_file)) {
         $removed = @unlink($mu_file);
     }
+    // Also remove mistaken path from 1.5.39
+    $wrong = dirname($base) . '/mu-plugins/vernal-opcache-recover.php';
+    if (file_exists($wrong)) {
+        @unlink($wrong);
+    }
     echo "ok\n";
     echo "action=remove_mu\n";
     echo "removed=" . ($removed ? '1' : '0') . "\n";
     echo "mu_exists=" . (file_exists($mu_file) ? '1' : '0') . "\n";
+    exit;
+}
+
+if ($action === 'read_diag') {
+    echo "ok\n";
+    echo "action=read_diag\n";
+    if (is_readable($diag_file)) {
+        echo "diag=" . trim((string) file_get_contents($diag_file)) . "\n";
+    } else {
+        echo "diag=\n";
+        echo "diag_exists=0\n";
+    }
     exit;
 }
 
@@ -122,10 +173,8 @@ if (function_exists('opcache_invalidate')) {
     foreach ($paths as $p) {
         $real = realpath($p);
         $target = ($real !== false) ? $real : $p;
-        if (is_string($target) && $target !== '' && file_exists($target)) {
-            if (@opcache_invalidate($target, true)) {
-                $invalidated++;
-            }
+        if (is_string($target) && $target !== '' && file_exists($target) && @opcache_invalidate($target, true)) {
+            $invalidated++;
         }
     }
 }
@@ -179,6 +228,8 @@ echo "boot_mtime=" . ($boot_mtime !== null ? $boot_mtime : 'none') . "\n";
 echo "api_size=" . ($api_size !== null ? $api_size : 'none') . "\n";
 echo "api_has_process=" . ($api_has_process === null ? 'none' : $api_has_process) . "\n";
 echo "mu_exists=" . (file_exists($mu_file) ? '1' : '0') . "\n";
+echo "mu_file=" . $mu_file . "\n";
+echo "wp_content=" . $wp_content . "\n";
 echo "sapi=" . PHP_SAPI . "\n";
 echo "php=" . PHP_VERSION . "\n";
 echo "script_filename=" . (isset($_SERVER['SCRIPT_FILENAME']) ? $_SERVER['SCRIPT_FILENAME'] : '') . "\n";
