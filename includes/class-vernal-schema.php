@@ -12,6 +12,8 @@
  * TOC injection rules:
  * - Articles: once via the_content, at the top of the body (guarded against double apply_filters).
  * - Show landings: once via ACF ih_show_summary only — never via the_content.
+ * - Only singular posts (articles, partner posts, show landings). Never Pages:
+ *   homepage, the blog index, or other site pages.
  * - show_toc defaults ON when unset (Vernal-managed sites).
  */
 
@@ -55,6 +57,55 @@ class Vernal_Schema {
         
         // Add BreadcrumbList schema (only when Vernal is schema authority)
         add_action('wp_head', array($this, 'add_breadcrumb_schema'), 50);
+    }
+
+    /**
+     * Jump-link TOC (visual nav + JSON-LD ItemList) is for article content only.
+     *
+     * Homepage, the blog posts page, and other Pages are site chrome. Elementor
+     * pages often contain H2s; those must not grow an "In This Article" list.
+     *
+     * @param string $post_type
+     * @param int    $post_id
+     * @param array  $view admin, singular, front_page, home, page_on_front, page_for_posts
+     * @return bool
+     */
+    public static function toc_allowed_for_view($post_type, $post_id, array $view) {
+        if (!empty($view['admin']) || empty($view['singular'])) {
+            return false;
+        }
+        if (!empty($view['front_page']) || !empty($view['home'])) {
+            return false;
+        }
+        $post_id = (int) $post_id;
+        $front = isset($view['page_on_front']) ? (int) $view['page_on_front'] : 0;
+        $blog = isset($view['page_for_posts']) ? (int) $view['page_for_posts'] : 0;
+        if ($post_id > 0 && (($front && $post_id === $front) || ($blog && $post_id === $blog))) {
+            return false;
+        }
+        return $post_type === 'post';
+    }
+
+    /**
+     * Current request is a singular content post (not the homepage or blog).
+     *
+     * @param WP_Post|null $post
+     * @return bool
+     */
+    private function toc_request_allowed($post = null) {
+        if ($post === null) {
+            global $post;
+        }
+        $post_type = ($post && isset($post->post_type)) ? (string) $post->post_type : '';
+        $post_id = ($post && !empty($post->ID)) ? (int) $post->ID : 0;
+        return self::toc_allowed_for_view($post_type, $post_id, array(
+            'admin' => is_admin(),
+            'singular' => is_singular(),
+            'front_page' => is_front_page(),
+            'home' => is_home(),
+            'page_on_front' => (int) get_option('page_on_front'),
+            'page_for_posts' => (int) get_option('page_for_posts'),
+        ));
     }
 
     /**
@@ -119,7 +170,7 @@ class Vernal_Schema {
      * Add table of contents to post body (articles only).
      */
     public function add_table_of_contents($content) {
-        if (!is_singular() || is_admin()) {
+        if (!$this->toc_request_allowed()) {
             return $content;
         }
 
@@ -157,7 +208,8 @@ class Vernal_Schema {
      * Prepend TOC into ACF show summary for Elementor templates (once per post/request).
      */
     public function prepend_toc_to_acf_summary($value, $post_id, $field) {
-        if (is_admin() || !is_singular()) {
+        $target = ((int) $post_id > 0 && function_exists('get_post')) ? get_post((int) $post_id) : null;
+        if (!$this->toc_request_allowed($target)) {
             return $value;
         }
         if (!is_string($value) || trim($value) === '') {
@@ -273,7 +325,7 @@ class Vernal_Schema {
      * (see add_schema_jsonld) to avoid duplicate ItemLists.
      */
     public function add_toc_itemlist_jsonld() {
-        if (!is_singular() || is_admin()) {
+        if (!$this->toc_request_allowed()) {
             return;
         }
         if (!$this->toc_enabled()) {
@@ -302,7 +354,7 @@ class Vernal_Schema {
      * Add Schema JSON-LD to head — only when Vernal is schema authority.
      */
     public function add_schema_jsonld() {
-        if (!is_singular() || is_admin()) {
+        if (!$this->toc_request_allowed()) {
             return;
         }
         if (!$this->vernal_is_schema_authority()) {

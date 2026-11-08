@@ -1390,9 +1390,9 @@ class Vernal_Settings {
                 value="1" 
                 <?php checked($value, 1); ?>
             />
-            <?php _e('Enable Table of Contents on posts and pages', 'vernal-contentum'); ?>
+            <?php _e('Enable Table of Contents on articles and show landings', 'vernal-contentum'); ?>
         </label>
-        <p class="description"><?php _e('Injects a visual TOC with jump links from HTML H2–H6 headings, plus a JSON-LD ItemList for AI discoverability. Requires real HTML headings in semantic content (not markdown ##). Part of the Vernal SEO contract alongside write-time media/AIOSEO metadata.', 'vernal-contentum'); ?></p>
+        <p class="description"><?php _e('Injects a visual TOC with jump links from HTML H2–H6 headings, plus a JSON-LD ItemList for AI discoverability, on singular posts only. Homepage, the blog, and other Pages are left alone. Requires real HTML headings in semantic content (not markdown ##). Part of the Vernal SEO contract alongside write-time media/AIOSEO metadata.', 'vernal-contentum'); ?></p>
         <?php
     }
     
