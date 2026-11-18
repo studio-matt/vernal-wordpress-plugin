@@ -107,6 +107,21 @@ class Vernal_Settings {
             'vernal-contentum-rag',
             array($this, 'render_rag_page')
         );
+
+        add_submenu_page(
+            'vernal-contentum',
+            __('Ecommerce', 'vernal-contentum'),
+            __('Ecommerce', 'vernal-contentum'),
+            'manage_options',
+            'vernal-contentum-ecommerce',
+            array($this, 'render_ecommerce_page')
+        );
+    }
+
+    public function render_ecommerce_page() {
+        if (class_exists('Vernal_Ecommerce')) {
+            Vernal_Ecommerce::get_instance()->render_page();
+        }
     }
 
     public function render_internal_links_page() {

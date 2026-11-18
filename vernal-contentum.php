@@ -3,12 +3,12 @@
  * Plugin Name: Vernal Contentum Bridge
  * Plugin URI: https://vernalcontentum.com
  * Description: Bridge between WordPress and Vernal Contentum web app for content creation and management
- * Version: 1.5.43
+ * Version: 1.5.44
  * Author: Vernal Contentum
  * License: GPL v2 or later
  * Text Domain: vernal-contentum
  *
- * Last updated: TOC jump links only on article posts, not homepage or blog (1.5.43).
+ * Last updated: Wishes Embedded Checkout on the Ecommerce screen (1.5.44).
  */
 
 // Exit if accessed directly
@@ -23,9 +23,10 @@ if (defined('VERNAL_CONTENTUM_VERSION')) {
 }
 
 // Define plugin constants
-define('VERNAL_CONTENTUM_VERSION', '1.5.43');
+define('VERNAL_CONTENTUM_VERSION', '1.5.44');
 define('VERNAL_CONTENTUM_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('VERNAL_CONTENTUM_PLUGIN_URL', plugin_dir_url(__FILE__));
+define('VERNAL_CONTENTUM_PLUGIN_FILE', __FILE__);
 define('VERNAL_CONTENTUM_PLUGIN_BASENAME', plugin_basename(__FILE__));
 
 // Initialize plugin update checker
@@ -88,6 +89,8 @@ require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-export.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-backend-api.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-sitemap.php';
 require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-schema.php';
+require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-wishes-contract.php';
+require_once VERNAL_CONTENTUM_PLUGIN_DIR . 'includes/class-vernal-ecommerce.php';
 $vernal_il_includes = array(
     'includes/class-vernal-internal-link-inserter.php',
     'includes/class-vernal-internal-links.php',
@@ -150,6 +153,9 @@ class Vernal_Contentum {
         }
         if (class_exists('Vernal_Rag_Admin')) {
             Vernal_Rag_Admin::get_instance();
+        }
+        if (class_exists('Vernal_Ecommerce')) {
+            Vernal_Ecommerce::get_instance();
         }
         
         // Activation/Deactivation hooks
